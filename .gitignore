@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Build artifacts
+decoder_cuda/build/
+*.exe
+*.dll
+*.obj
+*.o
+
+# Test results and temp files
+test_results/
+test_cuda/*.avi
+test_cuda/*.mp4
+test_cuda/*.bin
+*.tmp
+*.temp
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+nul
+test_cuda/videos/

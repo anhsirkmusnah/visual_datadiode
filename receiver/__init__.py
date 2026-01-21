@@ -1,17 +1,21 @@
 """
 Visual Data Diode - Receiver Module
 
-Receives files by decoding visual frames from USB capture device.
+Decodes files from recorded video files containing encoded visual data.
 """
 
-from .capture import FrameCapture
-from .decoder import FrameDecoder
+from .decoder import FrameDecoder, StreamDecoder
 from .sync import FrameSync
 from .assembler import BlockAssembler
+from .video_processor import VideoProcessor, ProcessorProgress, ProcessorResult, DecodedFile
 
 __all__ = [
-    'FrameCapture',
     'FrameDecoder',
+    'StreamDecoder',
     'FrameSync',
     'BlockAssembler',
+    'VideoProcessor',
+    'ProcessorProgress',
+    'ProcessorResult',
+    'DecodedFile',
 ]

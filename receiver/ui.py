@@ -1,14 +1,16 @@
 """
 Visual Data Diode - Receiver UI
 
-Tkinter-based user interface for the receiver application.
+Tkinter-based user interface for decoding video files.
+Supports processing recorded videos containing multiple encoded files.
 """
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
 import time
-from typing import Optional, Callable
+import os
+from typing import Optional, Callable, List
 from pathlib import Path
 import numpy as np
 
@@ -19,6 +21,7 @@ from shared import (
     PROFILE_CONSERVATIVE, PROFILE_STANDARD, PROFILE_AGGRESSIVE, PROFILE_ULTRA,
     check_fec_available, check_crypto_available
 )
+from .video_processor import get_video_info, ProcessorProgress, ProcessorState
 
 
 def format_duration(seconds: float) -> str:
@@ -35,43 +38,49 @@ def format_duration(seconds: float) -> str:
         return f"{hours}h {minutes}m"
 
 
+def format_size(size: int) -> str:
+    """Format file size as human-readable string."""
+    if size < 1024:
+        return f"{size} B"
+    elif size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    elif size < 1024 * 1024 * 1024:
+        return f"{size / (1024 * 1024):.1f} MB"
+    else:
+        return f"{size / (1024 * 1024 * 1024):.2f} GB"
+
+
 class ReceiverUI:
     """
     Tkinter UI for the Visual Data Diode receiver.
 
     Provides:
-    - Device selection
-    - Live preview
-    - Reception progress
-    - File save controls
+    - Video file selection
+    - Output directory selection
+    - Processing progress display
+    - Decoded files list
     """
 
     def __init__(self):
         self.root = tk.Tk()
-        self.root.title("Visual Data Diode - Receiver")
-        self.root.geometry("700x600")
+        self.root.title("Visual Data Diode - Video Decoder")
+        self.root.geometry("750x700")
         self.root.resizable(True, True)
-        self.root.minsize(600, 500)
+        self.root.minsize(650, 600)
 
         # State
-        self.is_receiving = False
-        self.is_synced = False
+        self.is_processing = False
+        self.video_path: Optional[str] = None
         self.output_dir = str(Path.home() / "Downloads")
-        self._devices = []  # Store device info from list_capture_devices()
+        self.video_info: Optional[dict] = None
 
         # Callbacks
         self.on_start: Optional[Callable] = None
         self.on_stop: Optional[Callable] = None
-        self.on_save: Optional[Callable] = None
 
         # Variables
-        self.profile_var = tk.StringVar(value="conservative")  # Conservative for reliability
-        self.device_var = tk.IntVar(value=3)  # Default to device 3 (validated 1080p capture)
+        self.profile_var = tk.StringVar(value="conservative")
         self.password_var = tk.StringVar(value="")
-        self.show_preview_var = tk.BooleanVar(value=True)
-
-        # Preview image
-        self._preview_photo = None
 
         # Build UI
         self._create_widgets()
@@ -82,57 +91,48 @@ class ReceiverUI:
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Input Source Section
-        source_frame = ttk.LabelFrame(main_frame, text="Input Source", padding="5")
-        source_frame.pack(fill=tk.X, pady=(0, 10))
-
-        # Source type selection
-        source_type_row = ttk.Frame(source_frame)
-        source_type_row.pack(fill=tk.X, pady=2)
-
-        self.source_type_var = tk.StringVar(value="device")
-        ttk.Radiobutton(
-            source_type_row, text="Live Capture", value="device",
-            variable=self.source_type_var, command=self._on_source_type_changed
-        ).pack(side=tk.LEFT)
-        ttk.Radiobutton(
-            source_type_row, text="Video File", value="file",
-            variable=self.source_type_var, command=self._on_source_type_changed
-        ).pack(side=tk.LEFT, padx=10)
-
-        # Device selection row
-        device_row = ttk.Frame(source_frame)
-        device_row.pack(fill=tk.X, pady=2)
-
-        ttk.Label(device_row, text="Device:").pack(side=tk.LEFT)
-
-        self.device_combo = ttk.Combobox(device_row, width=35, state="readonly")
-        self.device_combo.pack(side=tk.LEFT, padx=5)
-
-        self.refresh_btn = ttk.Button(
-            device_row, text="Refresh", command=self._refresh_devices
-        )
-        self.refresh_btn.pack(side=tk.LEFT)
+        # Video File Section
+        video_frame = ttk.LabelFrame(main_frame, text="Input Video", padding="5")
+        video_frame.pack(fill=tk.X, pady=(0, 10))
 
         # Video file selection row
-        file_row = ttk.Frame(source_frame)
+        file_row = ttk.Frame(video_frame)
         file_row.pack(fill=tk.X, pady=2)
 
-        ttk.Label(file_row, text="Video:").pack(side=tk.LEFT)
-
-        self.video_file_var = tk.StringVar(value="")
-        self.video_file_label = ttk.Label(file_row, text="No file selected", foreground="gray")
-        self.video_file_label.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-
-        self.browse_video_btn = ttk.Button(
-            file_row, text="Browse...", command=self._browse_video_file, state=tk.DISABLED
+        self.video_label = ttk.Label(
+            file_row, text="No video selected", foreground="gray"
         )
-        self.browse_video_btn.pack(side=tk.RIGHT)
+        self.video_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
-        self._refresh_devices()
+        self.browse_btn = ttk.Button(
+            file_row, text="Browse...", command=self._browse_video
+        )
+        self.browse_btn.pack(side=tk.RIGHT)
+
+        # Video info display
+        self.video_info_label = ttk.Label(
+            video_frame, text="", foreground="gray", font=('TkDefaultFont', 9)
+        )
+        self.video_info_label.pack(fill=tk.X, pady=(5, 0))
+
+        # Output Directory Section
+        output_frame = ttk.LabelFrame(main_frame, text="Output Directory", padding="5")
+        output_frame.pack(fill=tk.X, pady=(0, 10))
+
+        output_row = ttk.Frame(output_frame)
+        output_row.pack(fill=tk.X)
+
+        self.output_label = ttk.Label(
+            output_row, text=self.output_dir, foreground="blue"
+        )
+        self.output_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        ttk.Button(
+            output_row, text="Browse...", command=self._browse_output
+        ).pack(side=tk.RIGHT)
 
         # Settings Section
-        settings_frame = ttk.LabelFrame(main_frame, text="Settings", padding="5")
+        settings_frame = ttk.LabelFrame(main_frame, text="Decoding Settings", padding="5")
         settings_frame.pack(fill=tk.X, pady=(0, 10))
 
         # Profile selection
@@ -152,20 +152,6 @@ class ReceiverUI:
                 variable=self.profile_var
             ).pack(side=tk.LEFT, padx=5)
 
-        # Output directory
-        output_row = ttk.Frame(settings_frame)
-        output_row.pack(fill=tk.X, pady=2)
-
-        ttk.Label(output_row, text="Output:").pack(side=tk.LEFT)
-        self.output_label = ttk.Label(
-            output_row, text=self.output_dir, foreground="gray"
-        )
-        self.output_label.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
-
-        ttk.Button(
-            output_row, text="Browse...", command=self._browse_output
-        ).pack(side=tk.RIGHT)
-
         # Password for decryption
         password_row = ttk.Frame(settings_frame)
         password_row.pack(fill=tk.X, pady=2)
@@ -180,77 +166,83 @@ class ReceiverUI:
             foreground="gray"
         ).pack(side=tk.LEFT)
 
-        # Preview Section
-        preview_frame = ttk.LabelFrame(main_frame, text="Preview", padding="5")
-        preview_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-
-        preview_controls = ttk.Frame(preview_frame)
-        preview_controls.pack(fill=tk.X)
-
-        self.preview_check = ttk.Checkbutton(
-            preview_controls, text="Show live preview",
-            variable=self.show_preview_var
-        )
-        self.preview_check.pack(side=tk.LEFT)
-
-        self.sync_label = ttk.Label(
-            preview_controls, text="Sync: Not synced", foreground="gray"
-        )
-        self.sync_label.pack(side=tk.RIGHT)
-
-        # Preview canvas
-        self.preview_canvas = tk.Canvas(
-            preview_frame, width=320, height=180, bg='black'
-        )
-        self.preview_canvas.pack(fill=tk.BOTH, expand=True, pady=5)
-
         # Progress Section
-        progress_frame = ttk.LabelFrame(main_frame, text="Progress", padding="5")
+        progress_frame = ttk.LabelFrame(main_frame, text="Processing Progress", padding="5")
         progress_frame.pack(fill=tk.X, pady=(0, 10))
 
+        # Overall progress bar
+        ttk.Label(progress_frame, text="Video progress:").pack(anchor=tk.W)
         self.progress_bar = ttk.Progressbar(
             progress_frame, orient=tk.HORIZONTAL, length=400, mode='determinate'
         )
-        self.progress_bar.pack(fill=tk.X, pady=5)
+        self.progress_bar.pack(fill=tk.X, pady=2)
 
+        # Current file progress bar
+        ttk.Label(progress_frame, text="Current file:").pack(anchor=tk.W)
+        self.file_progress_bar = ttk.Progressbar(
+            progress_frame, orient=tk.HORIZONTAL, length=400, mode='determinate'
+        )
+        self.file_progress_bar.pack(fill=tk.X, pady=2)
+
+        # Progress labels
         self.progress_label = ttk.Label(
-            progress_frame, text="Ready to receive"
+            progress_frame, text="Ready to process"
         )
         self.progress_label.pack(fill=tk.X)
 
-        # Stats row
-        stats_row = ttk.Frame(progress_frame)
-        stats_row.pack(fill=tk.X)
-
         self.stats_label = ttk.Label(
-            stats_row, text="", foreground="gray"
+            progress_frame, text="", foreground="gray"
         )
-        self.stats_label.pack(side=tk.LEFT)
+        self.stats_label.pack(fill=tk.X)
 
-        self.fps_label = ttk.Label(
-            stats_row, text="FPS: --", foreground="gray"
+        # State indicator
+        self.state_label = ttk.Label(
+            progress_frame, text="State: Idle", foreground="gray"
         )
-        self.fps_label.pack(side=tk.RIGHT)
+        self.state_label.pack(fill=tk.X)
 
-        # Reception Details
-        details_row = ttk.Frame(progress_frame)
-        details_row.pack(fill=tk.X, pady=2)
+        # Decoded Files Section
+        files_frame = ttk.LabelFrame(main_frame, text="Decoded Files", padding="5")
+        files_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
-        self.blocks_label = ttk.Label(details_row, text="Blocks: 0/0")
-        self.blocks_label.pack(side=tk.LEFT)
+        # Files list with scrollbar
+        list_frame = ttk.Frame(files_frame)
+        list_frame.pack(fill=tk.BOTH, expand=True)
 
-        self.crc_label = ttk.Label(details_row, text="CRC Errors: 0")
-        self.crc_label.pack(side=tk.LEFT, padx=20)
+        # Create treeview for files
+        columns = ('filename', 'size', 'status', 'hash')
+        self.files_tree = ttk.Treeview(
+            list_frame, columns=columns, show='headings', height=8
+        )
 
-        self.fec_label = ttk.Label(details_row, text="FEC Corrections: 0")
-        self.fec_label.pack(side=tk.LEFT)
+        self.files_tree.heading('filename', text='Filename')
+        self.files_tree.heading('size', text='Size')
+        self.files_tree.heading('status', text='Status')
+        self.files_tree.heading('hash', text='Hash')
+
+        self.files_tree.column('filename', width=250)
+        self.files_tree.column('size', width=80)
+        self.files_tree.column('status', width=100)
+        self.files_tree.column('hash', width=100)
+
+        scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.files_tree.yview)
+        self.files_tree.configure(yscrollcommand=scrollbar.set)
+
+        self.files_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Files summary
+        self.files_summary_label = ttk.Label(
+            files_frame, text="No files decoded yet", foreground="gray"
+        )
+        self.files_summary_label.pack(fill=tk.X, pady=(5, 0))
 
         # Control Buttons
         control_frame = ttk.Frame(main_frame)
         control_frame.pack(fill=tk.X, pady=(10, 0))
 
         self.start_btn = ttk.Button(
-            control_frame, text="Start Receiving",
+            control_frame, text="Start Processing",
             command=self._on_start_clicked
         )
         self.start_btn.pack(side=tk.LEFT, padx=5)
@@ -261,43 +253,25 @@ class ReceiverUI:
         )
         self.stop_btn.pack(side=tk.LEFT, padx=5)
 
-        self.save_btn = ttk.Button(
-            control_frame, text="Save File",
-            command=self._on_save_clicked, state=tk.DISABLED
+        self.open_folder_btn = ttk.Button(
+            control_frame, text="Open Output Folder",
+            command=self._open_output_folder
         )
-        self.save_btn.pack(side=tk.LEFT, padx=5)
-
-        # File info
-        self.file_info_label = ttk.Label(
-            control_frame, text="", foreground="blue"
-        )
-        self.file_info_label.pack(side=tk.RIGHT)
+        self.open_folder_btn.pack(side=tk.LEFT, padx=5)
 
         # Status bar
         status_frame = ttk.Frame(main_frame)
         status_frame.pack(fill=tk.X, pady=(10, 0))
 
-        fec_status = "FEC: Available" if check_fec_available() else "FEC: Not available"
-        crypto_status = "Crypto: Available" if check_crypto_available() else "Crypto: Not available"
+        fec_status = "FEC: OK" if check_fec_available() else "FEC: N/A"
+        crypto_status = "Crypto: OK" if check_crypto_available() else "Crypto: N/A"
 
         ttk.Label(
             status_frame, text=f"{fec_status} | {crypto_status}",
             foreground="gray", font=('TkDefaultFont', 8)
         ).pack(side=tk.LEFT)
 
-    def _on_source_type_changed(self):
-        """Handle source type radio button change."""
-        source_type = self.source_type_var.get()
-        if source_type == "device":
-            self.device_combo.config(state="readonly")
-            self.refresh_btn.config(state=tk.NORMAL)
-            self.browse_video_btn.config(state=tk.DISABLED)
-        else:  # file
-            self.device_combo.config(state=tk.DISABLED)
-            self.refresh_btn.config(state=tk.DISABLED)
-            self.browse_video_btn.config(state=tk.NORMAL)
-
-    def _browse_video_file(self):
+    def _browse_video(self):
         """Browse for video file."""
         file_path = filedialog.askopenfilename(
             title="Select recorded video file",
@@ -306,61 +280,41 @@ class ReceiverUI:
                 ("All files", "*.*")
             ]
         )
+
         if file_path:
-            self.video_file_var.set(file_path)
-            # Truncate for display
+            self.video_path = file_path
+
+            # Display truncated path
             display = file_path
-            if len(display) > 40:
-                display = "..." + display[-37:]
-            self.video_file_label.config(text=display, foreground="black")
+            if len(display) > 60:
+                display = "..." + display[-57:]
+            self.video_label.config(text=display, foreground="black")
 
-    def _refresh_devices(self):
-        """Refresh capture device list in background thread."""
-        self.device_combo['values'] = ["Scanning devices..."]
-        self.device_combo.current(0)
-        self.refresh_btn.config(state=tk.DISABLED)
+            # Get video info
+            self._update_video_info(file_path)
 
-        def scan_devices():
-            try:
-                from .capture import list_capture_devices
-                devices = list_capture_devices()
-                # Update UI from main thread
-                self.root.after(0, lambda: self._update_device_list(devices))
-            except Exception as e:
-                self.root.after(0, lambda: self._update_device_list([], str(e)))
+    def _update_video_info(self, video_path: str):
+        """Update video info display."""
+        def load_info():
+            info = get_video_info(video_path)
+            self.root.after(0, lambda: self._display_video_info(info))
 
-        import threading
-        thread = threading.Thread(target=scan_devices, daemon=True)
-        thread.start()
+        # Load in background to avoid UI freeze
+        threading.Thread(target=load_info, daemon=True).start()
 
-    def _update_device_list(self, devices, error=None):
-        """Update device list in UI (called from main thread)."""
-        self.refresh_btn.config(state=tk.NORMAL)
-
-        if error:
-            self._devices = []
-            self.device_combo['values'] = [f"Error: {error}"]
-            self.device_combo.current(0)
-        elif devices:
-            self._devices = devices
-            options = [d['description'] for d in devices]
-            self.device_combo['values'] = options
-
-            # Try to select device 3 by default (validated 1080p capture card)
-            # Fall back to first 1080p device, then first device
-            preferred_index = 0
-            for i, d in enumerate(devices):
-                if d.get('index') == 3:
-                    preferred_index = i
-                    break
-                elif '1920x1080' in d.get('description', '') and preferred_index == 0:
-                    preferred_index = i
-
-            self.device_combo.current(preferred_index)
+    def _display_video_info(self, info: Optional[dict]):
+        """Display video info in UI."""
+        if info:
+            self.video_info = info
+            duration = format_duration(info['duration'])
+            text = (
+                f"{info['width']}x{info['height']} @ {info['fps']:.1f} FPS | "
+                f"{info['frames']:,} frames | Duration: {duration}"
+            )
+            self.video_info_label.config(text=text)
         else:
-            self._devices = []
-            self.device_combo['values'] = ["No devices found"]
-            self.device_combo.current(0)
+            self.video_info = None
+            self.video_info_label.config(text="Could not read video info")
 
     def _browse_output(self):
         """Browse for output directory."""
@@ -371,7 +325,6 @@ class ReceiverUI:
 
         if directory:
             self.output_dir = directory
-            # Truncate for display
             display = directory
             if len(display) > 50:
                 display = "..." + display[-47:]
@@ -379,8 +332,21 @@ class ReceiverUI:
 
     def _on_start_clicked(self):
         """Handle start button click."""
-        self.is_receiving = True
+        if not self.video_path:
+            messagebox.showwarning("No Video", "Please select a video file to process.")
+            return
+
+        if not os.path.exists(self.video_path):
+            messagebox.showerror("Error", "Selected video file does not exist.")
+            return
+
+        self.is_processing = True
         self._update_control_buttons()
+
+        # Clear previous files
+        for item in self.files_tree.get_children():
+            self.files_tree.delete(item)
+        self.files_summary_label.config(text="Processing...")
 
         if self.on_start:
             settings = self._get_settings()
@@ -388,16 +354,20 @@ class ReceiverUI:
 
     def _on_stop_clicked(self):
         """Handle stop button click."""
-        self.is_receiving = False
-        self._update_control_buttons()
+        if messagebox.askyesno("Confirm Stop", "Stop processing?"):
+            self.is_processing = False
+            self._update_control_buttons()
+            if self.on_stop:
+                self.on_stop()
 
-        if self.on_stop:
-            self.on_stop()
-
-    def _on_save_clicked(self):
-        """Handle save button click."""
-        if self.on_save:
-            self.on_save()
+    def _open_output_folder(self):
+        """Open output folder in file explorer."""
+        if os.path.exists(self.output_dir):
+            import subprocess
+            if os.name == 'nt':
+                subprocess.Popen(['explorer', self.output_dir])
+            else:
+                subprocess.Popen(['xdg-open', self.output_dir])
 
     def _get_settings(self) -> dict:
         """Get current settings."""
@@ -411,179 +381,111 @@ class ReceiverUI:
         else:
             profile = PROFILE_STANDARD
 
-        device_idx = self.device_combo.current()
-
-        # Get device name if available
-        device_name = None
-        if hasattr(self, '_devices') and device_idx < len(self._devices):
-            device_name = self._devices[device_idx].get('name')
-
-        # Check source type
-        source_type = self.source_type_var.get()
-        video_file = self.video_file_var.get() if source_type == "file" else None
-
         return {
-            'profile': profile,
-            'source_type': source_type,
-            'device_index': device_idx,
-            'device_name': device_name,
-            'video_file': video_file,
+            'video_path': self.video_path,
             'output_dir': self.output_dir,
-            'password': self.password_var.get() or None,
-            'show_preview': self.show_preview_var.get()
+            'profile': profile,
+            'password': self.password_var.get() or None
         }
 
     def _update_control_buttons(self):
         """Update button states."""
-        if self.is_receiving:
+        if self.is_processing:
             self.start_btn.config(state=tk.DISABLED)
             self.stop_btn.config(state=tk.NORMAL)
-            self.device_combo.config(state=tk.DISABLED)
-            self.refresh_btn.config(state=tk.DISABLED)
+            self.browse_btn.config(state=tk.DISABLED)
         else:
             self.start_btn.config(state=tk.NORMAL)
             self.stop_btn.config(state=tk.DISABLED)
-            self.device_combo.config(state="readonly")
-            self.refresh_btn.config(state=tk.NORMAL)
+            self.browse_btn.config(state=tk.NORMAL)
 
-    def update_preview(self, frame: np.ndarray):
-        """Update preview canvas with a frame."""
-        if not self.show_preview_var.get():
-            return
-
-        try:
-            from PIL import Image, ImageTk
-
-            # Resize for preview
-            h, w = frame.shape[:2]
-            preview_w = 320
-            preview_h = int(h * preview_w / w)
-
-            img = Image.fromarray(frame)
-            img = img.resize((preview_w, preview_h), Image.Resampling.LANCZOS)
-
-            self._preview_photo = ImageTk.PhotoImage(img)
-            self.preview_canvas.delete("all")
-            self.preview_canvas.create_image(
-                preview_w // 2, preview_h // 2,
-                image=self._preview_photo
-            )
-
-        except ImportError:
-            # PIL not available
-            pass
-        except Exception:
-            pass
-
-    def update_sync_status(self, synced: bool, confidence: float):
-        """Update sync status display."""
-        self.is_synced = synced
-
-        if synced:
-            self.sync_label.config(
-                text=f"Sync: OK ({confidence:.0%})",
-                foreground="green"
-            )
-        else:
-            self.sync_label.config(
-                text="Sync: Searching...",
-                foreground="orange"
-            )
-
-    def update_progress(
-        self,
-        blocks_received: int,
-        total_blocks: int,
-        crc_errors: int,
-        fec_corrections: int,
-        elapsed_time: float,
-        fps: float
-    ):
+    def update_progress(self, progress: ProcessorProgress):
         """Update progress display."""
-        if total_blocks > 0:
-            progress = (blocks_received / total_blocks) * 100
-            self.progress_bar['value'] = progress
-            self.progress_label.config(
-                text=f"Receiving: {blocks_received:,} / {total_blocks:,} blocks ({progress:.1f}%)"
-            )
+        # Video progress
+        if progress.total_frames > 0:
+            video_percent = (progress.current_frame / progress.total_frames) * 100
+            self.progress_bar['value'] = video_percent
 
-            remaining = total_blocks - blocks_received
-            if fps > 0:
-                eta = remaining / fps
-                self.stats_label.config(
-                    text=f"Elapsed: {format_duration(elapsed_time)} | ETA: {format_duration(eta)}"
-                )
+        # Current file progress
+        if progress.current_file_total_blocks > 0:
+            file_percent = (progress.current_file_blocks / progress.current_file_total_blocks) * 100
+            self.file_progress_bar['value'] = file_percent
         else:
-            self.progress_bar['value'] = 0
-            self.progress_label.config(text="Waiting for first block...")
+            self.file_progress_bar['value'] = 0
 
-        self.blocks_label.config(text=f"Blocks: {blocks_received}/{total_blocks}")
-        self.crc_label.config(text=f"CRC Errors: {crc_errors}")
-        self.fec_label.config(text=f"FEC Corrections: {fec_corrections}")
-        self.fps_label.config(text=f"FPS: {fps:.1f}")
+        # Progress text
+        self.progress_label.config(
+            text=f"Frame {progress.current_frame:,} / {progress.total_frames:,} | "
+                 f"Files found: {progress.files_found}"
+        )
 
-    def show_complete(
-        self,
-        success: bool,
-        filename: str = "",
-        file_size: int = 0,
-        hash_valid: bool = None,
-        message: str = ""
-    ):
+        # Stats
+        self.stats_label.config(
+            text=f"Files decoded: {progress.files_decoded} | "
+                 f"Gap frames skipped: {progress.gap_frames:,}"
+        )
+
+        # State
+        state_colors = {
+            ProcessorState.SCANNING: ("Scanning for sync...", "orange"),
+            ProcessorState.RECEIVING: ("Receiving data", "green"),
+            ProcessorState.END_DETECTED: ("End detected", "blue"),
+            ProcessorState.GAP: ("In gap between files", "gray")
+        }
+        text, color = state_colors.get(progress.state, ("Unknown", "gray"))
+        self.state_label.config(text=f"State: {text}", foreground=color)
+
+    def add_decoded_file(self, file_info: dict):
+        """Add a decoded file to the list."""
+        filename = file_info.get('filename', 'Unknown')
+        size = format_size(file_info.get('file_size', 0))
+
+        blocks = file_info.get('blocks_received', 0)
+        total = file_info.get('total_blocks', 0)
+        if blocks == total:
+            status = "Complete"
+        else:
+            status = f"Partial ({blocks}/{total})"
+
+        hash_valid = file_info.get('hash_valid')
+        if hash_valid is True:
+            hash_text = "Verified"
+        elif hash_valid is False:
+            hash_text = "MISMATCH"
+        else:
+            hash_text = "N/A"
+
+        self.files_tree.insert('', tk.END, values=(filename, size, status, hash_text))
+
+        # Update summary
+        children = self.files_tree.get_children()
+        self.files_summary_label.config(
+            text=f"{len(children)} file(s) decoded"
+        )
+
+    def show_complete(self, success: bool, message: str = "", files_decoded: int = 0, elapsed: float = 0):
         """Show completion status."""
-        self.is_receiving = False
+        self.is_processing = False
         self._update_control_buttons()
 
         if success:
             self.progress_bar['value'] = 100
-            self.progress_label.config(text="Reception complete!")
+            self.progress_label.config(text="Processing complete!")
+            self.state_label.config(text="State: Complete", foreground="green")
 
-            if hash_valid:
-                hash_status = "Hash: Verified"
-                hash_color = "green"
-            elif hash_valid is False:
-                hash_status = "Hash: MISMATCH"
-                hash_color = "red"
-            else:
-                hash_status = "Hash: Not verified"
-                hash_color = "gray"
-
-            self.file_info_label.config(
-                text=f"{filename} ({self._format_size(file_size)}) - {hash_status}",
-                foreground=hash_color
+            messagebox.showinfo(
+                "Complete",
+                f"Processing complete!\n\n"
+                f"Files decoded: {files_decoded}\n"
+                f"Time: {format_duration(elapsed)}\n\n"
+                f"Output directory:\n{self.output_dir}"
             )
-
-            self.save_btn.config(state=tk.NORMAL)
-
-            if hash_valid:
-                messagebox.showinfo(
-                    "Complete",
-                    f"File received successfully!\n\n"
-                    f"Filename: {filename}\n"
-                    f"Size: {self._format_size(file_size)}\n"
-                    f"Hash verified: Yes"
-                )
-            else:
-                messagebox.showwarning(
-                    "Complete with Warning",
-                    f"File received but hash verification {'failed' if hash_valid is False else 'not performed'}!\n\n"
-                    f"Filename: {filename}\n"
-                    f"Size: {self._format_size(file_size)}"
-                )
         else:
-            self.progress_label.config(text=f"Reception failed: {message}")
-            messagebox.showerror("Error", message or "Reception failed")
+            self.progress_label.config(text=f"Processing stopped: {message}")
+            self.state_label.config(text="State: Stopped", foreground="red")
 
-    def _format_size(self, size: int) -> str:
-        """Format file size."""
-        if size < 1024:
-            return f"{size} bytes"
-        elif size < 1024 * 1024:
-            return f"{size / 1024:.1f} KB"
-        elif size < 1024 * 1024 * 1024:
-            return f"{size / (1024 * 1024):.1f} MB"
-        else:
-            return f"{size / (1024 * 1024 * 1024):.2f} GB"
+            if message:
+                messagebox.showerror("Error", message)
 
     def run(self):
         """Start the UI main loop."""
