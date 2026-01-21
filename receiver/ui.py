@@ -16,7 +16,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared import (
-    PROFILE_CONSERVATIVE, PROFILE_STANDARD, PROFILE_AGGRESSIVE,
+    PROFILE_CONSERVATIVE, PROFILE_STANDARD, PROFILE_AGGRESSIVE, PROFILE_ULTRA,
     check_fec_available, check_crypto_available
 )
 
@@ -57,6 +57,7 @@ class ReceiverUI:
         self.is_receiving = False
         self.is_synced = False
         self.output_dir = str(Path.home() / "Downloads")
+        self._devices = []  # Store device info from list_capture_devices()
 
         # Callbacks
         self.on_start: Optional[Callable] = None
@@ -64,8 +65,8 @@ class ReceiverUI:
         self.on_save: Optional[Callable] = None
 
         # Variables
-        self.profile_var = tk.StringVar(value="standard")
-        self.device_var = tk.IntVar(value=0)
+        self.profile_var = tk.StringVar(value="conservative")  # Conservative for reliability
+        self.device_var = tk.IntVar(value=3)  # Default to device 3 (validated 1080p capture)
         self.password_var = tk.StringVar(value="")
         self.show_preview_var = tk.BooleanVar(value=True)
 
@@ -81,22 +82,52 @@ class ReceiverUI:
         main_frame = ttk.Frame(self.root, padding="10")
         main_frame.pack(fill=tk.BOTH, expand=True)
 
-        # Device Selection Section
-        device_frame = ttk.LabelFrame(main_frame, text="Capture Device", padding="5")
-        device_frame.pack(fill=tk.X, pady=(0, 10))
+        # Input Source Section
+        source_frame = ttk.LabelFrame(main_frame, text="Input Source", padding="5")
+        source_frame.pack(fill=tk.X, pady=(0, 10))
 
-        device_row = ttk.Frame(device_frame)
-        device_row.pack(fill=tk.X)
+        # Source type selection
+        source_type_row = ttk.Frame(source_frame)
+        source_type_row.pack(fill=tk.X, pady=2)
+
+        self.source_type_var = tk.StringVar(value="device")
+        ttk.Radiobutton(
+            source_type_row, text="Live Capture", value="device",
+            variable=self.source_type_var, command=self._on_source_type_changed
+        ).pack(side=tk.LEFT)
+        ttk.Radiobutton(
+            source_type_row, text="Video File", value="file",
+            variable=self.source_type_var, command=self._on_source_type_changed
+        ).pack(side=tk.LEFT, padx=10)
+
+        # Device selection row
+        device_row = ttk.Frame(source_frame)
+        device_row.pack(fill=tk.X, pady=2)
 
         ttk.Label(device_row, text="Device:").pack(side=tk.LEFT)
 
-        self.device_combo = ttk.Combobox(device_row, width=40, state="readonly")
+        self.device_combo = ttk.Combobox(device_row, width=35, state="readonly")
         self.device_combo.pack(side=tk.LEFT, padx=5)
 
         self.refresh_btn = ttk.Button(
             device_row, text="Refresh", command=self._refresh_devices
         )
         self.refresh_btn.pack(side=tk.LEFT)
+
+        # Video file selection row
+        file_row = ttk.Frame(source_frame)
+        file_row.pack(fill=tk.X, pady=2)
+
+        ttk.Label(file_row, text="Video:").pack(side=tk.LEFT)
+
+        self.video_file_var = tk.StringVar(value="")
+        self.video_file_label = ttk.Label(file_row, text="No file selected", foreground="gray")
+        self.video_file_label.pack(side=tk.LEFT, padx=5, fill=tk.X, expand=True)
+
+        self.browse_video_btn = ttk.Button(
+            file_row, text="Browse...", command=self._browse_video_file, state=tk.DISABLED
+        )
+        self.browse_video_btn.pack(side=tk.RIGHT)
 
         self._refresh_devices()
 
@@ -112,7 +143,8 @@ class ReceiverUI:
         profiles = [
             ("Conservative", "conservative"),
             ("Standard", "standard"),
-            ("Aggressive", "aggressive")
+            ("Aggressive", "aggressive"),
+            ("Ultra", "ultra")
         ]
         for text, value in profiles:
             ttk.Radiobutton(
@@ -253,21 +285,81 @@ class ReceiverUI:
             foreground="gray", font=('TkDefaultFont', 8)
         ).pack(side=tk.LEFT)
 
-    def _refresh_devices(self):
-        """Refresh capture device list."""
-        try:
-            from .capture import list_capture_devices
-            devices = list_capture_devices()
+    def _on_source_type_changed(self):
+        """Handle source type radio button change."""
+        source_type = self.source_type_var.get()
+        if source_type == "device":
+            self.device_combo.config(state="readonly")
+            self.refresh_btn.config(state=tk.NORMAL)
+            self.browse_video_btn.config(state=tk.DISABLED)
+        else:  # file
+            self.device_combo.config(state=tk.DISABLED)
+            self.refresh_btn.config(state=tk.DISABLED)
+            self.browse_video_btn.config(state=tk.NORMAL)
 
-            if devices:
-                options = [d['description'] for d in devices]
-                self.device_combo['values'] = options
-                self.device_combo.current(0)
-            else:
-                self.device_combo['values'] = ["No devices found"]
-                self.device_combo.current(0)
-        except Exception as e:
-            self.device_combo['values'] = [f"Error: {e}"]
+    def _browse_video_file(self):
+        """Browse for video file."""
+        file_path = filedialog.askopenfilename(
+            title="Select recorded video file",
+            filetypes=[
+                ("Video files", "*.mp4 *.avi *.mkv *.mov *.webm"),
+                ("All files", "*.*")
+            ]
+        )
+        if file_path:
+            self.video_file_var.set(file_path)
+            # Truncate for display
+            display = file_path
+            if len(display) > 40:
+                display = "..." + display[-37:]
+            self.video_file_label.config(text=display, foreground="black")
+
+    def _refresh_devices(self):
+        """Refresh capture device list in background thread."""
+        self.device_combo['values'] = ["Scanning devices..."]
+        self.device_combo.current(0)
+        self.refresh_btn.config(state=tk.DISABLED)
+
+        def scan_devices():
+            try:
+                from .capture import list_capture_devices
+                devices = list_capture_devices()
+                # Update UI from main thread
+                self.root.after(0, lambda: self._update_device_list(devices))
+            except Exception as e:
+                self.root.after(0, lambda: self._update_device_list([], str(e)))
+
+        import threading
+        thread = threading.Thread(target=scan_devices, daemon=True)
+        thread.start()
+
+    def _update_device_list(self, devices, error=None):
+        """Update device list in UI (called from main thread)."""
+        self.refresh_btn.config(state=tk.NORMAL)
+
+        if error:
+            self._devices = []
+            self.device_combo['values'] = [f"Error: {error}"]
+            self.device_combo.current(0)
+        elif devices:
+            self._devices = devices
+            options = [d['description'] for d in devices]
+            self.device_combo['values'] = options
+
+            # Try to select device 3 by default (validated 1080p capture card)
+            # Fall back to first 1080p device, then first device
+            preferred_index = 0
+            for i, d in enumerate(devices):
+                if d.get('index') == 3:
+                    preferred_index = i
+                    break
+                elif '1920x1080' in d.get('description', '') and preferred_index == 0:
+                    preferred_index = i
+
+            self.device_combo.current(preferred_index)
+        else:
+            self._devices = []
+            self.device_combo['values'] = ["No devices found"]
             self.device_combo.current(0)
 
     def _browse_output(self):
@@ -314,14 +406,28 @@ class ReceiverUI:
             profile = PROFILE_CONSERVATIVE
         elif profile_name == "aggressive":
             profile = PROFILE_AGGRESSIVE
+        elif profile_name == "ultra":
+            profile = PROFILE_ULTRA
         else:
             profile = PROFILE_STANDARD
 
         device_idx = self.device_combo.current()
 
+        # Get device name if available
+        device_name = None
+        if hasattr(self, '_devices') and device_idx < len(self._devices):
+            device_name = self._devices[device_idx].get('name')
+
+        # Check source type
+        source_type = self.source_type_var.get()
+        video_file = self.video_file_var.get() if source_type == "file" else None
+
         return {
             'profile': profile,
+            'source_type': source_type,
             'device_index': device_idx,
+            'device_name': device_name,
+            'video_file': video_file,
             'output_dir': self.output_dir,
             'password': self.password_var.get() or None,
             'show_preview': self.show_preview_var.get()

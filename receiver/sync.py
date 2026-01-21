@@ -134,44 +134,27 @@ class FrameSync:
 
     def _detect_border_colors(self, frame: np.ndarray) -> np.ndarray:
         """
-        Detect cyan and magenta pixels in frame.
+        Detect cyan and magenta pixels in frame using fast RGB method.
 
         Returns:
             Binary mask of sync-colored pixels
         """
-        # Convert to HSV for color detection
-        try:
-            import cv2
-            hsv = cv2.cvtColor(frame, cv2.COLOR_RGB2HSV)
-        except ImportError:
-            # Fallback: simple RGB detection
-            return self._detect_border_colors_rgb(frame)
-
-        # Detect cyan (H ~90)
-        cyan_mask = (
-            (hsv[:, :, 0] >= 80) & (hsv[:, :, 0] <= 100) &
-            (hsv[:, :, 1] >= 150) &
-            (hsv[:, :, 2] >= 150)
-        )
-
-        # Detect magenta (H ~150)
-        magenta_mask = (
-            (hsv[:, :, 0] >= 140) & (hsv[:, :, 0] <= 160) &
-            (hsv[:, :, 1] >= 150) &
-            (hsv[:, :, 2] >= 150)
-        )
-
-        return cyan_mask | magenta_mask
+        # Use fast RGB detection - HSV conversion is slow
+        return self._detect_border_colors_rgb(frame)
 
     def _detect_border_colors_rgb(self, frame: np.ndarray) -> np.ndarray:
-        """Fallback RGB-based border detection."""
-        r, g, b = frame[:, :, 0], frame[:, :, 1], frame[:, :, 2]
+        """Fast RGB-based border detection."""
+        # Pre-extract channels once
+        r = frame[:, :, 0]
+        g = frame[:, :, 1]
+        b = frame[:, :, 2]
 
-        # Cyan: low R, high G, high B
-        cyan_mask = (r < 100) & (g > 200) & (b > 200)
+        # Cyan: low R, high G, high B (0, 255, 255)
+        # Use wider tolerance for capture device color variance
+        cyan_mask = (r < 150) & (g > 150) & (b > 150) & (g > r + 50) & (b > r + 50)
 
-        # Magenta: high R, low G, high B
-        magenta_mask = (r > 200) & (g < 100) & (b > 200)
+        # Magenta: high R, low G, high B (255, 0, 255)
+        magenta_mask = (r > 150) & (g < 150) & (b > 150) & (r > g + 50) & (b > g + 50)
 
         return cyan_mask | magenta_mask
 
@@ -334,7 +317,10 @@ class FrameSync:
         self, frame: np.ndarray, sync_result: SyncResult
     ) -> Optional[np.ndarray]:
         """
-        Extract the cell grid from a synced frame.
+        Extract the cell grid from a synced frame by sampling cell centers.
+
+        Directly samples the center pixel of each cell to preserve discrete
+        gray levels. This is essential for accurate data recovery.
 
         Args:
             frame: RGB frame
@@ -355,28 +341,20 @@ class FrameSync:
         cell_w = width / self.grid_width
         cell_h = height / self.grid_height
 
-        # Sample center of each cell
-        grid = np.zeros((self.grid_height, self.grid_width, 3), dtype=np.uint8)
+        # Vectorized cell center sampling - fast and preserves discrete values
+        cols = np.arange(self.grid_width)
+        rows = np.arange(self.grid_height)
 
-        for row in range(self.grid_height):
-            for col in range(self.grid_width):
-                # Cell center
-                cx = int(left + (col + 0.5) * cell_w)
-                cy = int(top + (row + 0.5) * cell_h)
+        # Calculate center pixel coordinates for each cell
+        cx = (left + (cols + 0.5) * cell_w).astype(int)
+        cy = (top + (rows + 0.5) * cell_h).astype(int)
 
-                # Sample region (60% of cell)
-                sample_w = int(cell_w * 0.3)
-                sample_h = int(cell_h * 0.3)
+        # Clip to frame bounds
+        cx = np.clip(cx, 0, frame.shape[1] - 1)
+        cy = np.clip(cy, 0, frame.shape[0] - 1)
 
-                x1 = max(0, cx - sample_w)
-                x2 = min(frame.shape[1], cx + sample_w)
-                y1 = max(0, cy - sample_h)
-                y2 = min(frame.shape[0], cy + sample_h)
-
-                # Average color in sample region
-                region = frame[y1:y2, x1:x2]
-                if region.size > 0:
-                    grid[row, col] = np.mean(region, axis=(0, 1)).astype(np.uint8)
+        # Sample single pixel at each cell center (vectorized)
+        grid = frame[cy[:, None], cx[None, :]]
 
         return grid
 

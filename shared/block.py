@@ -9,6 +9,20 @@ import zlib
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
+
+def crc16(data: bytes) -> int:
+    """Compute CRC-16-CCITT for block linking."""
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte << 8
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = (crc << 1) ^ 0x1021
+            else:
+                crc <<= 1
+            crc &= 0xFFFF
+    return crc
+
 from .constants import (
     HEADER_SIZE, CRC_SIZE, BlockFlags,
     HEADER_SESSION_ID_OFFSET, HEADER_BLOCK_INDEX_OFFSET,
@@ -19,7 +33,7 @@ from .constants import (
 
 @dataclass
 class BlockHeader:
-    """Block header structure."""
+    """Block header structure with sequence tracking."""
     session_id: int      # 4 bytes: Random session identifier
     block_index: int     # 4 bytes: 0-indexed block number
     total_blocks: int    # 4 bytes: Total blocks in transfer
@@ -27,28 +41,32 @@ class BlockHeader:
     payload_size: int    # 2 bytes: Payload size in this block
     flags: BlockFlags    # 1 byte: Bit flags
     reserved: int = 0    # 1 byte: Reserved
+    sequence: int = 0    # 2 bytes: Sequence number (for stateful tracking)
+    prev_crc16: int = 0  # 2 bytes: CRC16 of previous block header+payload
 
     def pack(self) -> bytes:
-        """Pack header into 20 bytes."""
+        """Pack header into 24 bytes."""
         return struct.pack(
-            '<IIIIHBB',
+            '<IIIIHBBHH',
             self.session_id,
             self.block_index,
             self.total_blocks,
             self.file_size,
             self.payload_size,
             self.flags,
-            self.reserved
+            self.reserved,
+            self.sequence & 0xFFFF,
+            self.prev_crc16 & 0xFFFF
         )
 
     @classmethod
     def unpack(cls, data: bytes) -> 'BlockHeader':
-        """Unpack header from 20 bytes."""
+        """Unpack header from 24 bytes."""
         if len(data) < HEADER_SIZE:
             raise ValueError(f"Header data too short: {len(data)} < {HEADER_SIZE}")
 
-        session_id, block_index, total_blocks, file_size, payload_size, flags, reserved = \
-            struct.unpack('<IIIIHBB', data[:HEADER_SIZE])
+        session_id, block_index, total_blocks, file_size, payload_size, flags, reserved, sequence, prev_crc16 = \
+            struct.unpack('<IIIIHBBHH', data[:HEADER_SIZE])
 
         return cls(
             session_id=session_id,
@@ -57,7 +75,9 @@ class BlockHeader:
             file_size=file_size,
             payload_size=payload_size,
             flags=BlockFlags(flags),
-            reserved=reserved
+            reserved=reserved,
+            sequence=sequence,
+            prev_crc16=prev_crc16
         )
 
     @property

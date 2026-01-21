@@ -34,7 +34,9 @@ class FrameRenderer:
         self,
         fullscreen: bool = True,
         display_index: int = -1,
-        window_title: str = "Visual Data Diode - Sender"
+        window_title: str = "Visual Data Diode - Sender",
+        width: int = 0,
+        height: int = 0
     ):
         """
         Initialize renderer.
@@ -43,6 +45,8 @@ class FrameRenderer:
             fullscreen: Use fullscreen mode
             display_index: Display to use (-1 for default, 0 for primary, 1 for secondary)
             window_title: Window title (for windowed mode)
+            width: Output width (0 = use display default)
+            height: Output height (0 = use display default)
         """
         if not PYGAME_AVAILABLE:
             raise ImportError(
@@ -52,6 +56,8 @@ class FrameRenderer:
         self.fullscreen = fullscreen
         self.display_index = display_index
         self.window_title = window_title
+        self.width = width if width > 0 else FRAME_WIDTH
+        self.height = height if height > 0 else FRAME_HEIGHT
         self.screen: Optional[pygame.Surface] = None
         self._initialized = False
         self._running = False
@@ -60,7 +66,7 @@ class FrameRenderer:
 
     def initialize(self) -> bool:
         """
-        Initialize pygame and create display.
+        Initialize pygame and create display with hardware acceleration.
 
         Returns:
             True if successful
@@ -69,6 +75,13 @@ class FrameRenderer:
             return True
 
         try:
+            import os
+
+            # Enable hardware acceleration hints
+            os.environ['SDL_RENDER_DRIVER'] = 'direct3d11'  # Use Direct3D 11 on Windows
+            os.environ['SDL_HINT_RENDER_SCALE_QUALITY'] = '0'  # Nearest neighbor (fastest)
+            os.environ['SDL_HINT_RENDER_VSYNC'] = '0'  # Disable vsync for max FPS
+
             pygame.init()
             pygame.display.set_caption(self.window_title)
 
@@ -79,39 +92,50 @@ class FrameRenderer:
                 print(f"Warning: Display {self.display_index} not found, using default")
                 self.display_index = -1
 
+            # Get target display resolution if not specified
+            if self.display_index >= 0:
+                try:
+                    display_sizes = pygame.display.get_desktop_sizes()
+                    if self.display_index < len(display_sizes):
+                        if self.width == FRAME_WIDTH and self.height == FRAME_HEIGHT:
+                            # Use display's native resolution
+                            self.width = display_sizes[self.display_index][0]
+                            self.height = display_sizes[self.display_index][1]
+                except Exception:
+                    pass
+
             # Set up display
             if self.fullscreen:
                 # Position window on target display before going fullscreen
                 if self.display_index >= 0 and num_displays > 1:
-                    # Get display bounds
                     try:
                         display_bounds = pygame.display.get_desktop_sizes()
                         if self.display_index < len(display_bounds):
-                            # Calculate offset
                             x_offset = sum(
                                 display_bounds[i][0]
                                 for i in range(self.display_index)
                             )
-                            import os
                             os.environ['SDL_VIDEO_WINDOW_POS'] = f"{x_offset},0"
                     except Exception:
                         pass
 
-                flags = pygame.FULLSCREEN | pygame.HWSURFACE | pygame.DOUBLEBUF
+                # Hardware accelerated fullscreen flags
+                flags = pygame.FULLSCREEN | pygame.HWSURFACE | pygame.DOUBLEBUF | pygame.HWACCEL
                 self.screen = pygame.display.set_mode(
-                    (FRAME_WIDTH, FRAME_HEIGHT),
+                    (self.width, self.height),
                     flags
                 )
             else:
                 self.screen = pygame.display.set_mode(
-                    (FRAME_WIDTH, FRAME_HEIGHT),
-                    pygame.HWSURFACE | pygame.DOUBLEBUF
+                    (self.width, self.height),
+                    pygame.HWSURFACE | pygame.DOUBLEBUF | pygame.HWACCEL
                 )
 
             # Hide cursor in fullscreen
             if self.fullscreen:
                 pygame.mouse.set_visible(False)
 
+            print(f"Renderer initialized: {self.width}x{self.height} (HW accelerated)")
             self._initialized = True
             return True
 
@@ -123,16 +147,19 @@ class FrameRenderer:
         """Shutdown pygame and cleanup."""
         self._running = False
         if self._initialized:
-            pygame.quit()
+            try:
+                pygame.quit()
+            except Exception:
+                pass  # Ignore errors during shutdown
             self._initialized = False
             self.screen = None
 
     def render_frame(self, frame: np.ndarray):
         """
-        Render a frame to the display.
+        Render a frame to the display with hardware acceleration.
 
         Args:
-            frame: RGB frame as numpy array (FRAME_HEIGHT, FRAME_WIDTH, 3)
+            frame: RGB frame as numpy array (height, width, 3)
         """
         if not self._initialized:
             self.initialize()
@@ -149,7 +176,12 @@ class FrameRenderer:
             np.transpose(frame, (1, 0, 2))
         )
 
-        # Blit to screen
+        # Scale to display resolution if needed
+        frame_h, frame_w = frame.shape[:2]
+        if frame_w != self.width or frame_h != self.height:
+            surface = pygame.transform.scale(surface, (self.width, self.height))
+
+        # Blit to screen (hardware accelerated)
         self.screen.blit(surface, (0, 0))
         pygame.display.flip()
 
@@ -297,23 +329,105 @@ def check_pygame_available() -> bool:
     return PYGAME_AVAILABLE
 
 
+def _get_windows_display_names() -> list:
+    """Get actual display names on Windows using WMI and Win32 API."""
+    display_names = []
+
+    # Try WMI first for better monitor names
+    try:
+        import subprocess
+        result = subprocess.run(
+            ['powershell', '-Command',
+             'Get-CimInstance -Namespace root\\wmi -ClassName WmiMonitorID | ForEach-Object { '
+             '$name = ($_.UserFriendlyName | Where-Object {$_ -ne 0} | ForEach-Object {[char]$_}) -join ""; '
+             '$mfr = ($_.ManufacturerName | Where-Object {$_ -ne 0} | ForEach-Object {[char]$_}) -join ""; '
+             'if ($name) { "$mfr $name".Trim() } else { "Display" } '
+             '}'],
+            capture_output=True, text=True, timeout=5, creationflags=0x08000000  # CREATE_NO_WINDOW
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            names = [n.strip() for n in result.stdout.strip().split('\n') if n.strip()]
+            if names:
+                return names
+    except Exception:
+        pass
+
+    # Fallback to Win32 API
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class DISPLAY_DEVICE(ctypes.Structure):
+            _fields_ = [
+                ('cb', wintypes.DWORD),
+                ('DeviceName', wintypes.WCHAR * 32),
+                ('DeviceString', wintypes.WCHAR * 128),
+                ('StateFlags', wintypes.DWORD),
+                ('DeviceID', wintypes.WCHAR * 128),
+                ('DeviceKey', wintypes.WCHAR * 128),
+            ]
+
+        user32 = ctypes.windll.user32
+        i = 0
+
+        while True:
+            device = DISPLAY_DEVICE()
+            device.cb = ctypes.sizeof(device)
+
+            if not user32.EnumDisplayDevicesW(None, i, ctypes.byref(device), 0):
+                break
+
+            if device.StateFlags & 0x1:  # DISPLAY_DEVICE_ATTACHED_TO_DESKTOP
+                monitor = DISPLAY_DEVICE()
+                monitor.cb = ctypes.sizeof(monitor)
+                if user32.EnumDisplayDevicesW(device.DeviceName, 0, ctypes.byref(monitor), 0):
+                    name = monitor.DeviceString or device.DeviceString
+                else:
+                    name = device.DeviceString
+
+                # Filter out generic names
+                name_str = name.strip() if name else ""
+                if name_str and "Generic" not in name_str and "PnP" not in name_str:
+                    display_names.append(name_str)
+                else:
+                    display_names.append(f"Display {len(display_names) + 1}")
+
+            i += 1
+
+        return display_names
+
+    except Exception:
+        return []
+
+
 def list_displays() -> list:
-    """List available displays."""
+    """List available displays with actual names."""
     if not PYGAME_AVAILABLE:
         return []
 
     pygame.init()
     try:
         displays = []
-        for i, size in enumerate(pygame.display.get_desktop_sizes()):
+        sizes = pygame.display.get_desktop_sizes()
+
+        # Try to get actual display names on Windows
+        display_names = _get_windows_display_names()
+
+        for i, size in enumerate(sizes):
+            if i < len(display_names) and display_names[i]:
+                name = display_names[i]
+            else:
+                name = f"Display {i}"
+
             displays.append({
                 'index': i,
+                'name': name,
                 'width': size[0],
                 'height': size[1],
-                'description': f"Display {i}: {size[0]}x{size[1]}"
+                'description': f"{name} ({size[0]}x{size[1]})"
             })
         return displays
     except Exception:
-        return [{'index': 0, 'width': 1920, 'height': 1080, 'description': 'Default'}]
+        return [{'index': 0, 'name': 'Default', 'width': 1920, 'height': 1080, 'description': 'Default (1920x1080)'}]
     finally:
         pygame.quit()

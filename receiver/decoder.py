@@ -5,7 +5,8 @@ Decodes binary data from captured frame grids.
 """
 
 import numpy as np
-from typing import Optional, Tuple, List
+import time
+from typing import Optional, Tuple, List, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -17,7 +18,7 @@ from shared import (
     EncodingProfile, DEFAULT_PROFILE,
     GRAY_THRESHOLDS, gray_to_bits,
     HEADER_SIZE, CRC_SIZE,
-    SimpleFEC
+    SimpleFEC, crc16
 )
 
 
@@ -324,17 +325,33 @@ class FrameDecoder:
         self.low_confidence_cells = 0
 
 
+@dataclass
+class GapEvent:
+    """Event indicating a gap in the sequence."""
+    expected_sequence: int
+    received_sequence: int
+    expected_block_index: int
+    received_block_index: int
+    gap_size: int
+    timestamp: float
+
+
 class StreamDecoder:
     """
-    Decodes a stream of frames, handling duplicates and ordering.
+    Decodes a stream of frames with stateful sequence tracking.
+
+    Immediately detects missed frames using sequence numbers
+    and CRC16 chain verification.
     """
 
     def __init__(
         self,
         profile: EncodingProfile = DEFAULT_PROFILE,
-        fec_ratio: float = 0.10
+        fec_ratio: float = 0.10,
+        on_gap_detected: Optional[callable] = None
     ):
         self.decoder = FrameDecoder(profile, fec_ratio)
+        self.on_gap_detected = on_gap_detected  # Callback for gap events
 
         # Tracking state
         self.session_id: Optional[int] = None
@@ -343,9 +360,17 @@ class StreamDecoder:
         self.duplicate_count = 0
         self.failed_decodes = 0
 
+        # Sequence tracking state
+        self._expected_sequence: int = 0
+        self._expected_block_index: int = 0
+        self._last_block_crc16: int = 0
+        self._gaps: List[GapEvent] = []
+        self._chain_verified: int = 0  # Count of verified chain links
+        self._chain_broken: int = 0    # Count of broken chain links
+
     def process_grid(self, grid: np.ndarray) -> Optional[DecodeResult]:
         """
-        Process a single grid from the stream.
+        Process a single grid from the stream with stateful tracking.
 
         Args:
             grid: Cell grid
@@ -360,25 +385,63 @@ class StreamDecoder:
             return result
 
         block = result.block
-        block_idx = block.header.block_index
+        header = block.header
+        block_idx = header.block_index
 
         # Check session
         if self.session_id is None:
-            self.session_id = block.header.session_id
-            self.total_blocks = block.header.total_blocks
-        elif block.header.session_id != self.session_id:
+            self.session_id = header.session_id
+            self.total_blocks = header.total_blocks
+            self._expected_sequence = 0
+            self._expected_block_index = 0
+            self._last_block_crc16 = 0
+        elif header.session_id != self.session_id:
             # New session started
             self.reset()
-            self.session_id = block.header.session_id
-            self.total_blocks = block.header.total_blocks
+            self.session_id = header.session_id
+            self.total_blocks = header.total_blocks
 
         # Check for duplicate
         if block_idx in self.received_blocks:
             self.duplicate_count += 1
             return None
 
+        # Stateful sequence tracking - detect gaps immediately
+        if header.sequence != self._expected_sequence:
+            gap_size = (header.sequence - self._expected_sequence) & 0xFFFF
+            if gap_size > 0 and gap_size < 0x8000:  # Forward gap (not wrap-around backward)
+                gap_event = GapEvent(
+                    expected_sequence=self._expected_sequence,
+                    received_sequence=header.sequence,
+                    expected_block_index=self._expected_block_index,
+                    received_block_index=block_idx,
+                    gap_size=gap_size,
+                    timestamp=time.time()
+                )
+                self._gaps.append(gap_event)
+
+                # Notify callback if registered
+                if self.on_gap_detected:
+                    try:
+                        self.on_gap_detected(gap_event)
+                    except Exception:
+                        pass
+
+        # Verify chain link using prev_crc16
+        if block_idx > 0 and self._last_block_crc16 != 0:
+            if header.prev_crc16 != self._last_block_crc16:
+                self._chain_broken += 1
+            else:
+                self._chain_verified += 1
+
         # Store result
         self.received_blocks[block_idx] = result
+
+        # Update tracking state for next block
+        self._expected_sequence = (header.sequence + 1) & 0xFFFF
+        self._expected_block_index = block_idx + 1
+        self._last_block_crc16 = crc16(header.pack() + block.payload)
+
         return result
 
     def get_progress(self) -> Tuple[int, int]:
@@ -402,6 +465,21 @@ class StreamDecoder:
             if i not in self.received_blocks
         ]
 
+    def get_gaps(self) -> List[GapEvent]:
+        """Get list of detected gaps."""
+        return self._gaps.copy()
+
+    def get_chain_stats(self) -> dict:
+        """Get chain verification statistics."""
+        return {
+            'verified': self._chain_verified,
+            'broken': self._chain_broken,
+            'integrity': (
+                self._chain_verified / (self._chain_verified + self._chain_broken)
+                if (self._chain_verified + self._chain_broken) > 0 else 1.0
+            )
+        }
+
     def is_complete(self) -> bool:
         """Check if all blocks received."""
         if self.total_blocks is None:
@@ -416,4 +494,10 @@ class StreamDecoder:
         self.received_blocks.clear()
         self.duplicate_count = 0
         self.failed_decodes = 0
+        self._expected_sequence = 0
+        self._expected_block_index = 0
+        self._last_block_crc16 = 0
+        self._gaps.clear()
+        self._chain_verified = 0
+        self._chain_broken = 0
         self.decoder.reset_statistics()

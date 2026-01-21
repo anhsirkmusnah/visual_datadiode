@@ -16,7 +16,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared import (
-    PROFILE_CONSERVATIVE, PROFILE_STANDARD, PROFILE_AGGRESSIVE,
+    PROFILE_CONSERVATIVE, PROFILE_STANDARD, PROFILE_AGGRESSIVE, PROFILE_ULTRA,
     DEFAULT_FPS, check_fec_available, check_crypto_available
 )
 from .timing import format_duration
@@ -54,11 +54,13 @@ class SenderUI:
         self.on_restart: Optional[Callable] = None
 
         # Variables
-        self.profile_var = tk.StringVar(value="standard")
+        self.profile_var = tk.StringVar(value="conservative")  # Use conservative for reliability
         self.fps_var = tk.IntVar(value=DEFAULT_FPS)
         self.repeat_var = tk.IntVar(value=2)
         self.encrypt_var = tk.BooleanVar(value=False)
-        self.display_var = tk.IntVar(value=-1)
+        self.display_var = tk.IntVar(value=3)  # Default to Display 3 (validated)
+        self.resolution_var = tk.StringVar(value="1920x1080")
+        self._displays = []
 
         # Build UI
         self._create_widgets()
@@ -97,9 +99,10 @@ class SenderUI:
 
         ttk.Label(profile_frame, text="Profile:").pack(side=tk.LEFT)
         profiles = [
-            ("Conservative (reliable)", "conservative"),
+            ("Conservative", "conservative"),
             ("Standard", "standard"),
-            ("Aggressive (fast)", "aggressive")
+            ("Aggressive", "aggressive"),
+            ("Ultra (fastest)", "ultra")
         ]
         for text, value in profiles:
             ttk.Radiobutton(
@@ -148,9 +151,34 @@ class SenderUI:
 
         ttk.Label(display_frame, text="Display:").pack(side=tk.LEFT)
         self.display_combo = ttk.Combobox(
-            display_frame, width=30, state="readonly"
+            display_frame, width=35, state="readonly"
         )
         self.display_combo.pack(side=tk.LEFT, padx=5)
+        self.display_combo.bind('<<ComboboxSelected>>', self._on_display_selected)
+
+        # Resolution selection
+        resolution_frame = ttk.Frame(settings_frame)
+        resolution_frame.pack(fill=tk.X, pady=2)
+
+        ttk.Label(resolution_frame, text="Resolution:").pack(side=tk.LEFT)
+        self.resolution_combo = ttk.Combobox(
+            resolution_frame, width=15, textvariable=self.resolution_var, state="readonly"
+        )
+        resolutions = [
+            "1920x1080",
+            "1280x720",
+            "2560x1440",
+            "3840x2160",
+            "1600x900",
+            "1366x768"
+        ]
+        self.resolution_combo['values'] = resolutions
+        self.resolution_combo.pack(side=tk.LEFT, padx=5)
+        self.resolution_combo.bind('<<ComboboxSelected>>', self._on_resolution_changed)
+
+        ttk.Label(resolution_frame, text="(output to display)", foreground="gray").pack(side=tk.LEFT)
+
+        # Populate displays now that resolution_combo exists
         self._populate_displays()
 
         # Estimates Section
@@ -224,21 +252,52 @@ class SenderUI:
         ).pack(side=tk.LEFT)
 
     def _populate_displays(self):
-        """Populate display selection dropdown."""
+        """Populate display selection dropdown with actual display names."""
         try:
             from .renderer import list_displays
-            displays = list_displays()
+            self._displays = list_displays()
 
-            if displays:
-                options = ["Default (auto)"] + [d['description'] for d in displays]
+            if self._displays:
+                options = ["Default (auto)"] + [d['description'] for d in self._displays]
                 self.display_combo['values'] = options
                 self.display_combo.current(0)
+
+                # Set default resolution from primary display
+                default_res = f"{self._displays[0]['width']}x{self._displays[0]['height']}"
+                self.resolution_var.set(default_res)
+
+                # Add to resolutions if not present (only if combo exists)
+                if hasattr(self, 'resolution_combo'):
+                    current_vals = list(self.resolution_combo['values'])
+                    if default_res not in current_vals:
+                        current_vals.insert(0, default_res)
+                        self.resolution_combo['values'] = current_vals
             else:
+                self._displays = []
                 self.display_combo['values'] = ["Default"]
                 self.display_combo.current(0)
-        except Exception:
+        except Exception as e:
+            print(f"Error populating displays: {e}")
+            self._displays = []
             self.display_combo['values'] = ["Default"]
             self.display_combo.current(0)
+
+    def _on_display_selected(self, event=None):
+        """Handle display selection - update resolution to match display."""
+        idx = self.display_combo.current()
+        if idx > 0 and hasattr(self, '_displays') and idx - 1 < len(self._displays):
+            display = self._displays[idx - 1]
+            res = f"{display['width']}x{display['height']}"
+            self.resolution_var.set(res)
+            # Add to resolutions if not present
+            current_vals = list(self.resolution_combo['values'])
+            if res not in current_vals:
+                current_vals.insert(0, res)
+                self.resolution_combo['values'] = current_vals
+
+    def _on_resolution_changed(self, event=None):
+        """Handle resolution change."""
+        self._update_estimates()
 
     def _browse_file(self):
         """Open file browser dialog."""
@@ -287,6 +346,8 @@ class SenderUI:
             profile = PROFILE_CONSERVATIVE
         elif profile_name == "aggressive":
             profile = PROFILE_AGGRESSIVE
+        elif profile_name == "ultra":
+            profile = PROFILE_ULTRA
         else:
             profile = PROFILE_STANDARD
 
@@ -379,10 +440,19 @@ class SenderUI:
             profile = PROFILE_CONSERVATIVE
         elif profile_name == "aggressive":
             profile = PROFILE_AGGRESSIVE
+        elif profile_name == "ultra":
+            profile = PROFILE_ULTRA
         else:
             profile = PROFILE_STANDARD
 
         display_idx = self.display_combo.current() - 1  # -1 for "Default"
+
+        # Parse resolution
+        res_str = self.resolution_var.get()
+        try:
+            res_width, res_height = map(int, res_str.split('x'))
+        except:
+            res_width, res_height = 1920, 1080
 
         return {
             'file_path': self.file_path,
@@ -391,7 +461,9 @@ class SenderUI:
             'repeat_count': self.repeat_var.get(),
             'encrypt': self.encrypt_var.get(),
             'password': getattr(self, '_encryption_password', None),
-            'display_index': display_idx
+            'display_index': display_idx,
+            'resolution_width': res_width,
+            'resolution_height': res_height
         }
 
     def _on_pause_clicked(self):

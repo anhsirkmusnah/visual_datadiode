@@ -6,7 +6,7 @@ Common code used by both sender and receiver.
 
 from .constants import (
     FRAME_WIDTH, FRAME_HEIGHT, DEFAULT_FPS,
-    PROFILE_CONSERVATIVE, PROFILE_STANDARD, PROFILE_AGGRESSIVE,
+    PROFILE_CONSERVATIVE, PROFILE_STANDARD, PROFILE_AGGRESSIVE, PROFILE_ULTRA,
     DEFAULT_PROFILE, EncodingProfile,
     GRAY_LEVELS, GRAY_THRESHOLDS, gray_to_bits, bits_to_gray,
     COLOR_CYAN, COLOR_MAGENTA, COLOR_WHITE, COLOR_BLACK,
@@ -19,7 +19,7 @@ from .constants import (
 
 from .block import (
     BlockHeader, Block, FileMetadata,
-    calculate_payload_capacity, calculate_total_blocks
+    calculate_payload_capacity, calculate_total_blocks, crc16
 )
 
 from .fec import (
@@ -34,7 +34,7 @@ from .crypto import (
 __all__ = [
     # Constants
     'FRAME_WIDTH', 'FRAME_HEIGHT', 'DEFAULT_FPS',
-    'PROFILE_CONSERVATIVE', 'PROFILE_STANDARD', 'PROFILE_AGGRESSIVE',
+    'PROFILE_CONSERVATIVE', 'PROFILE_STANDARD', 'PROFILE_AGGRESSIVE', 'PROFILE_ULTRA',
     'DEFAULT_PROFILE', 'EncodingProfile',
     'GRAY_LEVELS', 'GRAY_THRESHOLDS', 'gray_to_bits', 'bits_to_gray',
     'COLOR_CYAN', 'COLOR_MAGENTA', 'COLOR_WHITE', 'COLOR_BLACK',
@@ -45,7 +45,7 @@ __all__ = [
     'CELL_SAMPLE_RATIO', 'PROTOCOL_VERSION', 'PROTOCOL_MAGIC',
     # Block
     'BlockHeader', 'Block', 'FileMetadata',
-    'calculate_payload_capacity', 'calculate_total_blocks',
+    'calculate_payload_capacity', 'calculate_total_blocks', 'crc16',
     # FEC
     'FECEncoder', 'FECDecoder', 'SimpleFEC', 'check_fec_available',
     # Crypto

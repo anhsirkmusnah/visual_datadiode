@@ -12,9 +12,9 @@ from typing import Tuple
 # Resolution and Frame Settings
 # =============================================================================
 
-FRAME_WIDTH = 1280
-FRAME_HEIGHT = 720
-DEFAULT_FPS = 20
+FRAME_WIDTH = 1920
+FRAME_HEIGHT = 1080
+DEFAULT_FPS = 30
 
 # =============================================================================
 # Encoding Profiles
@@ -69,6 +69,7 @@ class EncodingProfile:
 PROFILE_CONSERVATIVE = EncodingProfile("conservative", 16)
 PROFILE_STANDARD = EncodingProfile("standard", 10)
 PROFILE_AGGRESSIVE = EncodingProfile("aggressive", 8)
+PROFILE_ULTRA = EncodingProfile("ultra", 6)  # Smaller cells = higher throughput
 
 DEFAULT_PROFILE = PROFILE_STANDARD
 
@@ -80,6 +81,8 @@ DEFAULT_PROFILE = PROFILE_STANDARD
 GRAY_LEVELS = [0, 85, 170, 255]
 
 # Thresholds for decoding (midpoints between levels)
+# Each threshold is exactly halfway between adjacent levels
+# Level 0: 0-42, Level 1: 43-127, Level 2: 128-212, Level 3: 213-255
 GRAY_THRESHOLDS = [43, 128, 213]
 
 def gray_to_bits(gray_value: int) -> int:
@@ -136,7 +139,7 @@ CORNER_BOTTOM_RIGHT = [
 # Block Header Format
 # =============================================================================
 
-HEADER_SIZE = 20  # bytes
+HEADER_SIZE = 24  # bytes (expanded for sequence tracking)
 
 class BlockFlags(IntFlag):
     """Flags for block header."""
@@ -147,6 +150,8 @@ class BlockFlags(IntFlag):
     COMPRESSED = 0x08
 
 # Header field offsets and sizes
+# Format: [session_id(4)][block_index(4)][total_blocks(4)][file_size(4)]
+#         [payload_size(2)][flags(1)][reserved(1)][sequence(2)][prev_crc16(2)]
 HEADER_SESSION_ID_OFFSET = 0
 HEADER_SESSION_ID_SIZE = 4
 
@@ -167,6 +172,13 @@ HEADER_FLAGS_SIZE = 1
 
 HEADER_RESERVED_OFFSET = 19
 HEADER_RESERVED_SIZE = 1
+
+# New fields for stateful sequence tracking
+HEADER_SEQUENCE_OFFSET = 20
+HEADER_SEQUENCE_SIZE = 2  # Sequence number (wraps at 65535)
+
+HEADER_PREV_CRC16_OFFSET = 22
+HEADER_PREV_CRC16_SIZE = 2  # CRC16 of previous block (for chain verification)
 
 # =============================================================================
 # FEC Configuration

@@ -95,7 +95,9 @@ class SenderApplication:
             self.encoder = FrameEncoder(profile=self.profile)
             self.renderer = FrameRenderer(
                 fullscreen=True,
-                display_index=settings['display_index']
+                display_index=settings['display_index'],
+                width=settings.get('resolution_width', 1920),
+                height=settings.get('resolution_height', 1080)
             )
             self.timer = FrameTimer(fps=self.fps)
 
@@ -133,30 +135,41 @@ class SenderApplication:
     def _on_stop(self):
         """Handle stop."""
         self._running = False
-        if self.renderer:
-            self.renderer.shutdown()
+        self._paused = False  # Unpause so thread can exit
+        # Don't call renderer.shutdown() here - let the thread handle it in finally block
 
     def _on_restart(self):
         """Handle restart."""
         # Stop current transmission
         self._running = False
-        time.sleep(0.2)  # Allow thread to stop
+        self._paused = False  # Unpause so thread can exit
 
-        # Restart from beginning
-        self.current_block = 0
-        self.bytes_sent = 0
-        self.start_time = time.time()
-        self._running = True
-        self._paused = False
+        # Schedule the actual restart after a short delay to let thread exit
+        def do_restart():
+            # Wait for thread to finish (non-blocking check)
+            if self._transmission_thread and self._transmission_thread.is_alive():
+                # Check again in 100ms
+                self.ui.root.after(100, do_restart)
+                return
 
-        if self.timer:
-            self.timer.reset()
+            # Now restart
+            self.current_block = 0
+            self.bytes_sent = 0
+            self.start_time = time.time()
+            self._running = True
+            self._paused = False
 
-        self._transmission_thread = threading.Thread(
-            target=self._transmission_loop,
-            daemon=True
-        )
-        self._transmission_thread.start()
+            if self.timer:
+                self.timer.reset()
+
+            self._transmission_thread = threading.Thread(
+                target=self._transmission_loop,
+                daemon=True
+            )
+            self._transmission_thread.start()
+            self._schedule_progress_update()
+
+        self.ui.root.after(50, do_restart)
 
     def _transmission_loop(self):
         """Main transmission loop (runs in background thread)."""

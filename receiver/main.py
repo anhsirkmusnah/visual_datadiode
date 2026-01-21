@@ -14,7 +14,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared import EncodingProfile, DEFAULT_PROFILE
-from .capture import FrameCapture
+from .capture import FrameCapture, VideoFileCapture
 from .sync import FrameSync
 from .decoder import FrameDecoder, StreamDecoder
 from .assembler import BlockAssembler
@@ -68,10 +68,21 @@ class ReceiverApplication:
 
         # Initialize components
         try:
-            self.capture = FrameCapture(
-                device_index=settings['device_index'],
-                use_mjpeg=False  # Prefer YUV422 for MS2130
-            )
+            # Check source type
+            source_type = settings.get('source_type', 'device')
+
+            if source_type == 'file' and settings.get('video_file'):
+                # Use video file capture
+                self.capture = VideoFileCapture(
+                    video_path=settings['video_file']
+                )
+            else:
+                # Use live device capture
+                self.capture = FrameCapture(
+                    device_index=settings['device_index'],
+                    device_name=settings.get('device_name'),
+                    use_mjpeg=False  # Prefer YUV422 for MS2130
+                )
 
             self.sync = FrameSync(profile=self.profile)
             self.decoder = StreamDecoder(profile=self.profile)
@@ -215,6 +226,11 @@ class ReceiverApplication:
 
         elapsed = time.time() - self.start_time
         fps = self.frames_processed / elapsed if elapsed > 0 else 0
+
+        # Debug: Print capture FPS vs processing FPS
+        if self.capture and hasattr(self.capture, 'actual_fps'):
+            capture_fps = self.capture.actual_fps
+            print(f"Capture FPS: {capture_fps:.1f} | Processing FPS: {fps:.1f} | Processed: {self.frames_processed}")
 
         # Get decoder progress
         received, total = 0, 0

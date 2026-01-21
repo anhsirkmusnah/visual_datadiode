@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from shared import (
     Block, BlockHeader, BlockFlags, FileMetadata,
-    SimpleFEC, compute_file_hash,
+    SimpleFEC, compute_file_hash, crc16,
     EncodingProfile, DEFAULT_PROFILE, DEFAULT_FEC_RATIO,
     HEADER_SIZE, CRC_SIZE
 )
@@ -79,6 +79,10 @@ class FileChunker:
         self.total_blocks = 0
         self.aes_nonce: Optional[bytes] = None
         self.aes_tag: Optional[bytes] = None
+
+        # Sequence tracking for stateful transmission
+        self._sequence_number = 0
+        self._prev_block_crc16 = 0  # CRC16 of previous block (header + payload)
 
     def _calculate_capacities(self):
         """Calculate block capacities based on profile and FEC."""
@@ -181,6 +185,10 @@ class FileChunker:
         if self.file_path is None:
             raise ValueError("No file prepared. Call prepare_file() first.")
 
+        # Reset sequence tracking at start of transmission
+        self._sequence_number = 0
+        self._prev_block_crc16 = 0
+
         # Open file for reading
         if self.encrypt and hasattr(self, '_encrypted_data'):
             file_data = self._encrypted_data
@@ -195,7 +203,7 @@ class FileChunker:
             data_reader.close()
 
     def _generate_block(self, block_index: int, data_reader) -> Block:
-        """Generate a single block."""
+        """Generate a single block with sequence tracking."""
         is_first = (block_index == 0)
         is_last = (block_index == self.total_blocks - 1)
 
@@ -231,14 +239,16 @@ class FileChunker:
         # Combine metadata and payload for block 0
         full_payload = metadata_bytes + payload_data
 
-        # Create header
+        # Create header with sequence tracking
         header = BlockHeader(
             session_id=self.session_id,
             block_index=block_index,
             total_blocks=self.total_blocks,
             file_size=self.file_size,
             payload_size=len(full_payload),
-            flags=flags
+            flags=flags,
+            sequence=self._sequence_number,
+            prev_crc16=self._prev_block_crc16
         )
 
         # Create block and compute FEC
@@ -248,6 +258,10 @@ class FileChunker:
         block_data = header.pack() + full_payload
         _, parity = self.fec.encode(block_data)
         block.fec_parity = parity
+
+        # Update sequence tracking for next block
+        self._sequence_number = (self._sequence_number + 1) & 0xFFFF
+        self._prev_block_crc16 = crc16(header.pack() + full_payload)
 
         return block
 
