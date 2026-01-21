@@ -188,7 +188,7 @@ class FrameDecoder:
         self, gray_values: np.ndarray
     ) -> Tuple[np.ndarray, float]:
         """
-        Quantize grayscale values to 2-bit values.
+        Quantize grayscale values to 2-bit values (vectorized).
 
         Args:
             gray_values: 2D array of grayscale values (0-255)
@@ -196,45 +196,49 @@ class FrameDecoder:
         Returns:
             (bits_array, confidence)
         """
-        h, w = gray_values.shape
-        bits = np.zeros((h, w), dtype=np.uint8)
-        confidences = []
+        # Vectorized quantization - much faster than loops
+        # Levels: 0, 85, 170, 255 -> thresholds at 42.5, 127.5, 212.5
+        bits = np.zeros_like(gray_values, dtype=np.uint8)
+        bits[gray_values >= 42.5] = 1
+        bits[gray_values >= 127.5] = 2
+        bits[gray_values >= 212.5] = 3
 
-        for i in range(h):
-            for j in range(w):
-                val = gray_values[i, j]
-                bit_val, conf = self._quantize_single(val)
-                bits[i, j] = bit_val
-                confidences.append(conf)
-                self.total_cells_decoded += 1
-                if conf < 0.7:
-                    self.low_confidence_cells += 1
+        # Vectorized confidence calculation
+        levels = np.array([0, 85, 170, 255], dtype=np.float32)
+        # Distance to nearest level
+        distances = np.abs(gray_values[:, :, np.newaxis] - levels)
+        min_distances = np.min(distances, axis=2)
+        confidences = 1.0 - np.minimum(min_distances / 42.5, 1.0)
 
-        avg_confidence = np.mean(confidences) if confidences else 0.0
+        # Update statistics
+        total_cells = gray_values.size
+        self.total_cells_decoded += total_cells
+        self.low_confidence_cells += np.sum(confidences < 0.7)
+
+        avg_confidence = float(np.mean(confidences))
         return bits, avg_confidence
 
     def _quantize_single(self, value: float) -> Tuple[int, float]:
         """
-        Quantize a single grayscale value.
-
-        Returns:
-            (bit_value, confidence)
+        Quantize a single grayscale value (legacy, for compatibility).
         """
-        # Find which level this value is closest to
+        if value < 42.5:
+            bit_val = 0
+        elif value < 127.5:
+            bit_val = 1
+        elif value < 212.5:
+            bit_val = 2
+        else:
+            bit_val = 3
+
         levels = [0, 85, 170, 255]
-        distances = [abs(value - level) for level in levels]
-        min_idx = np.argmin(distances)
-        min_dist = distances[min_idx]
-
-        # Confidence based on distance to threshold
-        # Perfect: 0, threshold boundary: 42.5
+        min_dist = abs(value - levels[bit_val])
         confidence = 1.0 - min(min_dist / 42.5, 1.0)
-
-        return min_idx, confidence
+        return bit_val, confidence
 
     def _bits_to_bytes(self, bits: np.ndarray) -> bytes:
         """
-        Pack 2-bit cell values into bytes.
+        Pack 2-bit cell values into bytes (vectorized).
 
         Args:
             bits: 2D array of 2-bit values (0-3)
@@ -243,23 +247,18 @@ class FrameDecoder:
             Packed bytes
         """
         # Flatten row-major
-        flat = bits.flatten()
+        flat = bits.flatten().astype(np.uint8)
 
-        # Pack 4 cells per byte
-        num_bytes = len(flat) // 4
-        result = bytearray(num_bytes)
+        # Pad to multiple of 4 if needed
+        remainder = len(flat) % 4
+        if remainder:
+            flat = np.pad(flat, (0, 4 - remainder))
 
-        for i in range(num_bytes):
-            idx = i * 4
-            byte_val = (
-                (flat[idx] << 6) |
-                (flat[idx + 1] << 4) |
-                (flat[idx + 2] << 2) |
-                flat[idx + 3]
-            )
-            result[i] = byte_val
+        # Reshape to groups of 4 and pack vectorized
+        groups = flat.reshape(-1, 4)
+        packed = (groups[:, 0] << 6) | (groups[:, 1] << 4) | (groups[:, 2] << 2) | groups[:, 3]
 
-        return bytes(result)
+        return bytes(packed.astype(np.uint8))
 
     def calibrate_thresholds(self, sample_grids: List[np.ndarray]):
         """

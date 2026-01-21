@@ -134,29 +134,72 @@ class FrameSync:
 
     def _detect_border_colors(self, frame: np.ndarray) -> np.ndarray:
         """
-        Detect cyan and magenta pixels in frame using fast RGB method.
+        Detect cyan and magenta pixels using fast downsampled detection.
 
         Returns:
-            Binary mask of sync-colored pixels
+            Binary mask of sync-colored pixels (at original resolution)
         """
-        # Use fast RGB detection - HSV conversion is slow
-        return self._detect_border_colors_rgb(frame)
+        return self._detect_border_colors_fast(frame)
 
-    def _detect_border_colors_rgb(self, frame: np.ndarray) -> np.ndarray:
-        """Fast RGB-based border detection."""
-        # Pre-extract channels once
-        r = frame[:, :, 0]
-        g = frame[:, :, 1]
-        b = frame[:, :, 2]
+    def _detect_border_colors_fast(self, frame: np.ndarray) -> np.ndarray:
+        """
+        Fast border detection using downsampling and border-only checking.
+        """
+        h, w = frame.shape[:2]
+
+        # Downsample for faster detection (4x4 = 16x speedup)
+        scale = 4
+        small = frame[::scale, ::scale, :]
+        sh, sw = small.shape[:2]
+
+        # Only check border regions of downsampled image
+        border_check = 30  # 30 pixels at 1/4 scale = 120 at full scale
+
+        # Create small mask
+        small_mask = np.zeros((sh, sw), dtype=bool)
+
+        # Check border strips
+        # Top strip
+        region = small[:border_check, :]
+        small_mask[:border_check, :] = self._detect_sync_colors_rgb(region)
+
+        # Bottom strip
+        region = small[sh - border_check:, :]
+        small_mask[sh - border_check:, :] = self._detect_sync_colors_rgb(region)
+
+        # Left strip (excluding corners already done)
+        region = small[border_check:sh - border_check, :border_check]
+        small_mask[border_check:sh - border_check, :border_check] = self._detect_sync_colors_rgb(region)
+
+        # Right strip
+        region = small[border_check:sh - border_check, sw - border_check:]
+        small_mask[border_check:sh - border_check, sw - border_check:] = self._detect_sync_colors_rgb(region)
+
+        # Upscale mask back to original size using nearest neighbor
+        mask = np.repeat(np.repeat(small_mask, scale, axis=0), scale, axis=1)
+
+        # Trim to original size (in case of rounding)
+        mask = mask[:h, :w]
+
+        return mask
+
+    def _detect_sync_colors_rgb(self, region: np.ndarray) -> np.ndarray:
+        """Fast RGB-based sync color detection for a region."""
+        r = region[:, :, 0].astype(np.int16)
+        g = region[:, :, 1].astype(np.int16)
+        b = region[:, :, 2].astype(np.int16)
 
         # Cyan: low R, high G, high B (0, 255, 255)
-        # Use wider tolerance for capture device color variance
-        cyan_mask = (r < 150) & (g > 150) & (b > 150) & (g > r + 50) & (b > r + 50)
+        cyan_mask = (r < 150) & (g > 150) & (b > 150) & ((g - r) > 50) & ((b - r) > 50)
 
         # Magenta: high R, low G, high B (255, 0, 255)
-        magenta_mask = (r > 150) & (g < 150) & (b > 150) & (r > g + 50) & (b > g + 50)
+        magenta_mask = (r > 150) & (g < 150) & (b > 150) & ((r - g) > 50) & ((b - g) > 50)
 
         return cyan_mask | magenta_mask
+
+    def _detect_border_colors_rgb(self, frame: np.ndarray) -> np.ndarray:
+        """Full frame RGB-based border detection (slower, for fallback)."""
+        return self._detect_sync_colors_rgb(frame)
 
     def _find_frame_bounds(
         self, border_mask: np.ndarray
