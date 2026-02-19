@@ -24,6 +24,7 @@ from .encoder import FrameEncoder
 from .video_encoder import VideoEncoder, BatchVideoEncoder
 from .timing import format_duration
 from .ui import SenderUI
+from .binary_sender import BinarySender
 
 
 class SenderApplication:
@@ -58,6 +59,12 @@ class SenderApplication:
         self.file_paths: List[str] = []
         self.output_dir: str = ""
 
+        # Binary streaming state
+        self._binary_sender: Optional[BinarySender] = None
+        self._stream_thread: Optional[threading.Thread] = None
+        self._stream_running = False
+        self._stream_progress = {}  # latest progress from callback
+
         # Connect UI callbacks
         self._setup_ui_callbacks()
 
@@ -65,6 +72,8 @@ class SenderApplication:
         """Connect UI callbacks to handler methods."""
         self.ui.on_start = self._on_start
         self.ui.on_stop = self._on_stop
+        self.ui.on_stream_start = self._on_stream_start
+        self.ui.on_stream_stop = self._on_stream_stop
 
     def _on_start(self, settings: dict):
         """Handle start encoding."""
@@ -297,6 +306,84 @@ class SenderApplication:
             return f"{size / (1024 * 1024):.1f} MB"
         else:
             return f"{size / (1024 * 1024 * 1024):.2f} GB"
+
+    # ── Binary Stream handlers ───────────────────────────────────────
+
+    def _on_stream_start(self, settings: dict):
+        """Handle Start Streaming from Binary Stream tab."""
+        self._stream_running = True
+        self._stream_progress = {}
+
+        def on_progress(block_idx, total_blocks, bytes_sent, elapsed, current_file):
+            self._stream_progress = {
+                'block_idx': block_idx,
+                'total_blocks': total_blocks,
+                'bytes_sent': bytes_sent,
+                'elapsed': elapsed,
+                'current_file': current_file,
+            }
+
+        self._binary_sender = BinarySender(
+            display_index=settings['display_index'],
+            fps=settings['fps'],
+            repeat_count=settings['repeat_count'],
+            fec_ratio=settings['fec_ratio'],
+            calibration_secs=settings['calibration_secs'],
+            on_progress=on_progress,
+        )
+
+        def stream_thread():
+            try:
+                self._binary_sender.run_queue(settings['file_paths'])
+                if self._stream_running:
+                    self._signal_stream_complete(True, "All files streamed successfully!")
+            except Exception as e:
+                self._signal_stream_complete(False, str(e))
+
+        self._stream_thread = threading.Thread(target=stream_thread, daemon=True)
+        self._stream_thread.start()
+
+        # Start progress polling
+        self._schedule_stream_progress()
+
+    def _on_stream_stop(self):
+        """Handle Stop from Binary Stream tab."""
+        self._stream_running = False
+        if self._binary_sender:
+            self._binary_sender.stop()
+
+    def _schedule_stream_progress(self):
+        """Poll progress dict and update UI every 200ms."""
+        if not self._stream_running:
+            return
+
+        p = self._stream_progress
+        if p:
+            try:
+                self.ui.update_stream_progress(
+                    block_idx=p.get('block_idx', 0),
+                    total_blocks=p.get('total_blocks', 0),
+                    bytes_sent=p.get('bytes_sent', 0),
+                    elapsed=p.get('elapsed', 0),
+                    current_file=p.get('current_file', ''),
+                )
+            except Exception:
+                pass
+
+        if self._stream_running:
+            self.ui.root.after(200, self._schedule_stream_progress)
+
+    def _signal_stream_complete(self, success: bool, message: str):
+        """Signal binary stream complete to UI."""
+        self._stream_running = False
+
+        def show():
+            self.ui.show_stream_complete(success, message)
+
+        try:
+            self.ui.root.after(100, show)
+        except Exception:
+            pass
 
     def run(self):
         """Run the application."""

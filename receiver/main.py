@@ -16,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from shared import EncodingProfile, DEFAULT_PROFILE
 from .video_processor import VideoProcessor, ProcessorProgress, DecodedFile, ProcessorResult
 from .ui import ReceiverUI
+from .binary_receiver import BinaryReceiver
 
 
 class ReceiverApplication:
@@ -38,6 +39,11 @@ class ReceiverApplication:
         self.output_dir = ""
         self.password: Optional[str] = None
 
+        # Binary capture state
+        self._binary_receiver: Optional[BinaryReceiver] = None
+        self._capture_thread: Optional[threading.Thread] = None
+        self._capture_running = False
+
         # Connect UI callbacks
         self._setup_ui_callbacks()
 
@@ -45,6 +51,8 @@ class ReceiverApplication:
         """Connect UI callbacks."""
         self.ui.on_start = self._on_start
         self.ui.on_stop = self._on_stop
+        self.ui.on_capture_start = self._on_capture_start
+        self.ui.on_capture_stop = self._on_capture_stop
 
     def _on_start(self, settings: dict):
         """Handle start processing."""
@@ -134,6 +142,65 @@ class ReceiverApplication:
 
         def show():
             self.ui.show_complete(False, message=message)
+
+        try:
+            self.ui.root.after(100, show)
+        except Exception:
+            pass
+
+    # ── Binary Capture handlers ──────────────────────────────────────
+
+    def _on_capture_start(self, settings: dict):
+        """Handle Start Capture from Binary Stream tab."""
+        self._capture_running = True
+
+        def on_progress(stats_dict):
+            if not self._capture_running:
+                return
+            try:
+                self.ui.root.after(0, lambda s=stats_dict: self.ui.update_capture_progress(s))
+            except Exception:
+                pass
+
+        def on_file_complete(result_dict):
+            try:
+                self.ui.root.after(0, lambda r=result_dict: self.ui.add_capture_file(r))
+            except Exception:
+                pass
+
+        self._binary_receiver = BinaryReceiver(
+            output_dir=settings['output_dir'],
+            device_index=settings['device_index'],
+            fec_ratio=settings['fec_ratio'],
+            idle_timeout=settings['idle_timeout'],
+            on_progress=on_progress,
+            on_file_complete=on_file_complete,
+        )
+
+        def capture_thread():
+            try:
+                success = self._binary_receiver.run()
+                if self._capture_running:
+                    msg = "File received and verified!" if success else "Capture finished (check results)"
+                    self._signal_capture_complete(success is not False, msg)
+            except Exception as e:
+                self._signal_capture_complete(False, str(e))
+
+        self._capture_thread = threading.Thread(target=capture_thread, daemon=True)
+        self._capture_thread.start()
+
+    def _on_capture_stop(self):
+        """Handle Stop from Binary Stream tab."""
+        self._capture_running = False
+        if self._binary_receiver:
+            self._binary_receiver.stop()
+
+    def _signal_capture_complete(self, success: bool, message: str):
+        """Signal binary capture complete to UI."""
+        self._capture_running = False
+
+        def show():
+            self.ui.show_capture_complete(success, message)
 
         try:
             self.ui.root.after(100, show)
