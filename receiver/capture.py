@@ -95,6 +95,10 @@ class FrameCapture:
             self.cap = cv2.VideoCapture(self.device_index, cv2.CAP_MSMF)
             if self.cap.isOpened():
                 backend_name = "MSMF"
+                # Set MJPG fourcc FIRST — MSMF requires this to negotiate
+                # 1080p with many USB capture cards (YUY2/NV12 fail to set res)
+                self.cap.set(cv2.CAP_PROP_FOURCC,
+                             cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
                 self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
                 self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
                 self.cap.set(cv2.CAP_PROP_FPS, self.fps)
@@ -396,7 +400,9 @@ def list_capture_devices() -> List[dict]:
     for i in range(10):
         cap = cv2.VideoCapture(i, cv2.CAP_MSMF)
         if cap.isOpened():
-            # Try to set 1080p to detect capable devices
+            # Set MJPG fourcc first — required for MSMF to negotiate 1080p
+            cap.set(cv2.CAP_PROP_FOURCC,
+                    cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
             cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
             cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 
@@ -441,23 +447,20 @@ def open_capture_device(device_info: dict, width: int = FRAME_WIDTH, height: int
     name = device_info.get('name', '')
     index = device_info.get('index', 0)
 
-    # Try opening by name with DSHOW first (most reliable for USB capture)
-    cap = cv2.VideoCapture(f'video={name}', cv2.CAP_DSHOW)
-    if cap.isOpened():
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        return cap
-
-    # Try MSMF by index
+    # Try MSMF by index (fastest backend, requires MJPG for 1080p)
     cap = cv2.VideoCapture(index, cv2.CAP_MSMF)
     if cap.isOpened():
+        cap.set(cv2.CAP_PROP_FOURCC,
+                cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         return cap
 
-    # Try DSHOW by index
+    # Try DSHOW by index (may hang on some systems)
     cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
     if cap.isOpened():
+        cap.set(cv2.CAP_PROP_FOURCC,
+                cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         return cap
@@ -465,6 +468,8 @@ def open_capture_device(device_info: dict, width: int = FRAME_WIDTH, height: int
     # Try default backend
     cap = cv2.VideoCapture(index)
     if cap.isOpened():
+        cap.set(cv2.CAP_PROP_FOURCC,
+                cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
         return cap

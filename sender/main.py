@@ -329,6 +329,7 @@ class SenderApplication:
             repeat_count=settings['repeat_count'],
             fec_ratio=settings['fec_ratio'],
             calibration_secs=settings['calibration_secs'],
+            passes=settings.get('passes', 3),
             on_progress=on_progress,
         )
 

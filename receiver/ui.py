@@ -95,7 +95,7 @@ class ReceiverUI:
         # Variables - Binary Stream
         self.bs_device_var = tk.StringVar(value="")
         self.bs_fec_var = tk.StringVar(value="10%")
-        self.bs_timeout_var = tk.IntVar(value=5)
+        self.bs_timeout_var = tk.IntVar(value=10)
 
         # Build UI
         self._create_widgets()

@@ -120,10 +120,11 @@ class BinarySender:
         filepath: str = None,
         display_index: int = 1,
         fps: int = 60,
-        repeat_count: int = 1,
+        repeat_count: int = 2,
         fec_ratio: float = 0.10,
-        calibration_secs: float = 2.0,
+        calibration_secs: float = 5.0,
         end_secs: float = 1.0,
+        passes: int = 3,
         on_progress=None,
     ):
         self.display_index = display_index
@@ -132,6 +133,7 @@ class BinarySender:
         self.fec_ratio = fec_ratio
         self.calibration_secs = calibration_secs
         self.end_secs = end_secs
+        self.passes = passes  # number of complete loops through data (0=infinite)
         self.on_progress = on_progress
         self._running = True
 
@@ -194,13 +196,13 @@ class BinarySender:
         print(f"  File: {self.filepath}")
         print(f"  Size: {self.file_size:,} bytes ({self.file_size / (1024*1024):.1f} MB)")
         print(f"  Session: 0x{self.session_id:08X}")
-        print(f"  FPS: {self.fps}, Repeat: {self.repeat_count}x")
+        print(f"  FPS: {self.fps}, Repeat: {self.repeat_count}x, Passes: {self.passes}")
         print(f"  FEC ratio: {self.fec_ratio:.0%}")
         print(f"  Payload/frame: {self.payload_capacity:,} bytes")
         print(f"  Total blocks: {self.total_blocks:,}")
-        total_frames = self.total_blocks * self.repeat_count
+        total_frames = self.total_blocks * self.repeat_count * max(self.passes, 1)
         est_time = total_frames / self.fps
-        print(f"  Total frames: {total_frames:,} ({est_time:.1f}s)")
+        print(f"  Total frames: {total_frames:,} ({est_time:.1f}s per pass)")
         net_mbps = self.payload_capacity * self.fps / self.repeat_count / (1024 * 1024)
         print(f"  Net throughput: {net_mbps:.1f} MB/s")
 
@@ -227,13 +229,22 @@ class BinarySender:
             # Phase 1: Calibration
             self._send_calibration(screen, pg, surface, timer)
 
-            # Phase 2: Data frames
-            self._send_data(screen, pg, surface, timer, file_hash)
+            # Phase 2: Data frames (loop for multiple passes)
+            pass_num = 0
+            while self._running:
+                pass_num += 1
+                if self.passes > 0 and pass_num > self.passes:
+                    break
+
+                if pass_num > 1:
+                    print(f"\n  --- Pass {pass_num}/{self.passes if self.passes > 0 else '∞'} ---")
+
+                self._send_data(screen, pg, surface, timer, file_hash)
 
             # Phase 3: End frames
             self._send_end(screen, pg, surface, timer)
 
-            print(f"\n  TRANSMISSION COMPLETE")
+            print(f"\n  TRANSMISSION COMPLETE ({pass_num} passes)")
             print(f"  Timing: {timer.stats.frames_sent} frames in {timer.stats.total_time:.1f}s")
             print(f"  Actual FPS: {timer.stats.actual_fps:.1f}")
             if timer.stats.late_frames > 0:
@@ -254,9 +265,9 @@ class BinarySender:
         pg.event.pump()
 
     def _send_calibration(self, screen, pg, surface, timer: FrameTimer):
-        """Send calibration frames: white, black, checkerboard."""
+        """Send calibration frames: white, black, checkerboard, data-density pattern."""
         n_frames = int(self.calibration_secs * self.fps)
-        phase_frames = max(1, n_frames // 3)
+        phase_frames = max(1, n_frames // 4)
 
         print(f"\n  Phase 1: Calibration ({n_frames} frames, {self.calibration_secs:.1f}s)")
 
@@ -286,9 +297,24 @@ class BinarySender:
             self._render_frame(screen, pg, surface, checker)
             timer.wait_for_next_frame()
 
+        # Data-density pattern: alternating half-black/half-white rows
+        # Simulates ~50% bit density of real binary data to let AGC settle
+        data_pattern = np.zeros((FRAME_HEIGHT, FRAME_WIDTH), dtype=np.uint8)
+        data_pattern[0::2, :] = 255  # even rows white, odd rows black
+        for i in range(phase_frames):
+            if not self._running:
+                return
+            # Alternate between two patterns every few frames for variety
+            if (i // 4) % 2 == 1:
+                data_pattern_inv = 255 - data_pattern
+                self._render_frame(screen, pg, surface, data_pattern_inv)
+            else:
+                self._render_frame(screen, pg, surface, data_pattern)
+            timer.wait_for_next_frame()
+
     def _send_data(self, screen, pg, surface, timer: FrameTimer, file_hash: bytes):
-        """Stream all data blocks."""
-        print(f"\n  Phase 2: Data transmission ({self.total_blocks} blocks)")
+        """Stream all data blocks (single pass)."""
+        print(f"\n  Data transmission ({self.total_blocks} blocks)")
 
         start_time = time.perf_counter()
 
@@ -417,15 +443,23 @@ class BinarySender:
                 if not self._running:
                     break
 
-                # Data
-                self._send_data(screen, pg, surface, timer, file_hash)
+                # Data (loop for multiple passes)
+                pass_num = 0
+                while self._running:
+                    pass_num += 1
+                    if self.passes > 0 and pass_num > self.passes:
+                        break
+                    if pass_num > 1:
+                        print(f"\n  --- Pass {pass_num}/{self.passes if self.passes > 0 else '∞'} ---")
+                    self._send_data(screen, pg, surface, timer, file_hash)
+
                 if not self._running:
                     break
 
                 # End
                 self._send_end(screen, pg, surface, timer)
 
-                print(f"\n  File complete: {self.filename}")
+                print(f"\n  File complete: {self.filename} ({pass_num} passes)")
                 print(f"  Timing: {timer.stats.frames_sent} frames, "
                       f"actual FPS: {timer.stats.actual_fps:.1f}")
 
@@ -446,12 +480,14 @@ def main():
                         help='Display index for output (default: 1)')
     parser.add_argument('--fps', type=int, default=60,
                         help='Target FPS (default: 60)')
-    parser.add_argument('--repeat', type=int, default=1,
-                        help='Repeat count per frame (default: 1)')
+    parser.add_argument('--repeat', type=int, default=2,
+                        help='Repeat count per frame (default: 2)')
     parser.add_argument('--fec', type=float, default=0.10,
                         help='FEC ratio (default: 0.10)')
-    parser.add_argument('--calibration', type=float, default=2.0,
-                        help='Calibration duration in seconds (default: 2.0)')
+    parser.add_argument('--calibration', type=float, default=5.0,
+                        help='Calibration duration in seconds (default: 5.0)')
+    parser.add_argument('--passes', type=int, default=3,
+                        help='Number of complete data passes (default: 3, 0=infinite)')
     args = parser.parse_args()
 
     if not os.path.isfile(args.file):
@@ -465,6 +501,7 @@ def main():
         repeat_count=args.repeat,
         fec_ratio=args.fec,
         calibration_secs=args.calibration,
+        passes=args.passes,
     )
     sender.run()
 

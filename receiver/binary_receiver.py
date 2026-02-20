@@ -5,7 +5,7 @@ Real-time capture and decode of 1-bit pixel-level binary frames
 from a USB HDMI capture device.
 
 Uses:
-- Capture thread with DirectShow + YUY2 @ 1920x1080 @ 60fps
+- Capture thread with MSMF (preferred) or DirectShow @ 1920x1080 @ 60fps
 - Disk-backed block store to handle files up to 100GB+
 - Deduplication by block index
 - SHA-256 verification on assembly
@@ -45,9 +45,9 @@ class BinaryCapture:
     """
     Lightweight capture thread for USB HDMI capture device.
 
-    Opens DirectShow with YUY2 format, converts to grayscale,
-    and puts frames in a bounded queue. Drops oldest on overflow
-    to maintain real-time priority.
+    Tries MSMF backend first (async, faster, doesn't hang), falls back
+    to DirectShow. Converts to grayscale and puts frames in a bounded
+    queue. Drops oldest on overflow to maintain real-time priority.
     """
 
     def __init__(self, device_index: int = 2, queue_size: int = 4):
@@ -64,14 +64,20 @@ class BinaryCapture:
 
     def start(self) -> bool:
         """Open capture device and start capture thread."""
-        self._cap = cv2.VideoCapture(self.device_index, cv2.CAP_DSHOW)
+        # Try MSMF first (async, faster, doesn't hang on many devices)
+        print(f"  Trying MSMF backend for device {self.device_index}...")
+        self._cap = cv2.VideoCapture(self.device_index, cv2.CAP_MSMF)
         if not self._cap.isOpened():
-            print(f"  Error: Cannot open capture device {self.device_index}")
+            print(f"  MSMF failed, trying DirectShow...")
+            self._cap = cv2.VideoCapture(self.device_index, cv2.CAP_DSHOW)
+        if not self._cap.isOpened():
+            print(f"  Error: Cannot open capture device {self.device_index} with any backend")
             return False
 
-        # Configure for YUY2 1920x1080 @ 60fps
+        # Set MJPG fourcc FIRST — MSMF requires this to negotiate 1080p
+        # with many USB capture cards (YUY2/NV12 often fail to set resolution)
         self._cap.set(cv2.CAP_PROP_FOURCC,
-                      cv2.VideoWriter_fourcc('Y', 'U', 'Y', '2'))
+                      cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
         self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
         self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
         self._cap.set(cv2.CAP_PROP_FPS, 60)
@@ -84,10 +90,13 @@ class BinaryCapture:
         fourcc = int(self._cap.get(cv2.CAP_PROP_FOURCC))
         fmt = ''.join([chr((fourcc >> 8*i) & 0xFF)
                        for i in range(4) if 32 <= ((fourcc >> 8*i) & 0xFF) < 127])
-        print(f"  Capture: {w}x{h} @ {fps:.0f}fps, format={fmt}")
+        backend_name = self._cap.getBackendName() if hasattr(self._cap, 'getBackendName') else 'unknown'
+        print(f"  Capture: {w}x{h} @ {fps:.0f}fps, format={fmt}, backend={backend_name}")
 
         if w != FRAME_WIDTH or h != FRAME_HEIGHT:
-            print(f"  Warning: Resolution mismatch ({w}x{h} != {FRAME_WIDTH}x{FRAME_HEIGHT})")
+            print(f"  FATAL: Resolution {w}x{h}, need {FRAME_WIDTH}x{FRAME_HEIGHT}")
+            self._cap.release()
+            return False
 
         self._running = True
         self._thread = threading.Thread(target=self._capture_loop, daemon=True)

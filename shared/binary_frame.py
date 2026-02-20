@@ -158,13 +158,25 @@ def bytes_to_binary_frame(data: bytes) -> np.ndarray:
     return frame
 
 
-def binary_frame_to_bytes(frame: np.ndarray) -> bytes:
+def binary_frame_to_bytes(frame: np.ndarray, threshold: float = None) -> bytes:
     """
-    Convert a grayscale frame to packed bytes via threshold at 128.
+    Convert a grayscale frame to packed bytes via adaptive threshold.
+
+    If threshold is None (default), computes it from the frame's actual
+    min/max pixel values to handle HDMI pipeline distortion (gamma, AGC,
+    color space conversion) where black may be 15-40 and white 210-245.
 
     Returns exactly 259,200 bytes.
     """
-    binary = (frame.ravel() >= 128).astype(np.uint8)
+    flat = frame.ravel()
+    if threshold is None:
+        fmin, fmax = int(flat.min()), int(flat.max())
+        if fmax - fmin > 50:
+            # Enough contrast — use midpoint of actual range
+            threshold = (fmin + fmax) / 2.0
+        else:
+            threshold = 128  # fallback for blank/uniform frames
+    binary = (flat >= threshold).astype(np.uint8)
     packed = np.packbits(binary)
     return bytes(packed[:BINARY_FRAME_BYTES])
 

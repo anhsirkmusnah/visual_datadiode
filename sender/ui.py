@@ -539,6 +539,7 @@ class SenderUI:
             'repeat_count': self.bs_repeat_var.get(),
             'fec_ratio': self._bs_get_fec_ratio(),
             'calibration_secs': self.bs_calibration_var.get(),
+            'passes': 3,  # loop data 3 times so receiver catches all blocks
         }
 
     def _bs_update_controls(self):
