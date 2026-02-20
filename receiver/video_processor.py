@@ -274,7 +274,7 @@ class VideoProcessor:
 
             if self._consecutive_black_frames >= self._end_frame_threshold:
                 # End pattern detected
-                print(f"[Frame {self._current_frame}] End pattern detected")
+                print(f"[Frame {self._current_frame}] End pattern detected ({self._consecutive_black_frames} black frames)")
                 self._finalize_current_file()
                 self._state = ProcessorState.GAP
                 self._consecutive_black_frames = 0
@@ -297,7 +297,8 @@ class VideoProcessor:
 
             # Too many unsynced frames - might have missed end
             if self._consecutive_unsynced_frames > 30:
-                print(f"[Frame {self._current_frame}] Lost sync, finalizing file")
+                received, total = self._decoder.get_progress() if self._decoder else (0, 0)
+                print(f"[Frame {self._current_frame}] Lost sync after 30 frames, blocks so far: {received}/{total}")
                 self._finalize_current_file()
                 self._state = ProcessorState.SCANNING
                 self._consecutive_unsynced_frames = 0
@@ -373,17 +374,32 @@ class VideoProcessor:
             print(f"  No blocks received, skipping file")
             return
 
+        # Print decode statistics
+        print(f"  Decode stats: {received} blocks received, {self._decoder.failed_decodes} decode failures, {self._decoder.duplicate_count} duplicates")
+        chain_stats = self._decoder.get_chain_stats()
+        print(f"  Chain integrity: {chain_stats['integrity']:.1%} (verified: {chain_stats['verified']}, broken: {chain_stats['broken']})")
+        print(f"  CRC errors: {self._crc_errors}, FEC corrections: {self._fec_corrections}")
+
         # Check if complete
         if not self._assembler.is_complete():
-            missing = self._assembler.get_status().missing_blocks
+            status = self._assembler.get_status()
+            missing = status.missing_blocks
             print(f"  Incomplete: {received}/{total} blocks, missing {len(missing)}")
+            if len(missing) <= 10:
+                print(f"  Missing block indices: {missing}")
             # Still try to assemble what we have if most blocks received
             if received < total * 0.9:
                 print(f"  Skipping file (too many missing blocks)")
                 return
+            # Try partial assembly for near-complete files (>90%)
+            print(f"  Attempting partial assembly ({received/total*100:.1f}% complete)...")
 
-        # Assemble file
-        result = self._assembler.assemble()
+        # Assemble file (will succeed if complete, or we'll force partial assembly)
+        if self._assembler.is_complete():
+            result = self._assembler.assemble()
+        else:
+            # Force partial assembly by filling missing blocks with zeros
+            result = self._assemble_partial()
 
         if result.output_path:
             # Create decoded file record
@@ -409,6 +425,48 @@ class VideoProcessor:
             # Callback
             if self.on_file_complete:
                 self.on_file_complete(decoded)
+
+    def _assemble_partial(self) -> AssemblyStatus:
+        """
+        Attempt partial assembly by filling missing blocks with zeros.
+
+        Returns:
+            AssemblyStatus with result
+        """
+        assembler = self._assembler
+        if not assembler or assembler.total_blocks is None:
+            return AssemblyStatus(
+                complete=False,
+                blocks_received=0,
+                total_blocks=0,
+                missing_blocks=[],
+                file_hash_valid=None,
+                output_path=None,
+                filename=None,
+                file_size=0,
+                message="No assembler state"
+            )
+
+        # Calculate expected block payload size (from existing blocks)
+        block_sizes = [len(v) for v in assembler.blocks.values()]
+        if not block_sizes:
+            return assembler.get_status()
+
+        # Use most common block size (last block may be smaller)
+        from collections import Counter
+        size_counts = Counter(block_sizes)
+        common_size = size_counts.most_common(1)[0][0]
+
+        # Fill missing blocks with zeros
+        missing = [i for i in range(assembler.total_blocks) if i not in assembler.blocks]
+        for idx in missing:
+            # Last block might be smaller, but we don't know exact size
+            # Use common size as approximation
+            assembler.blocks[idx] = bytes(common_size)
+            print(f"    Filled missing block {idx} with {common_size} zero bytes")
+
+        # Now assembly should succeed
+        return assembler.assemble()
 
     def _get_progress(self) -> ProcessorProgress:
         """Get current progress."""

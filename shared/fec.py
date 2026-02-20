@@ -168,9 +168,10 @@ class FECDecoder:
                     data[j] for j in range(i, len(data), num_codewords)
                 )
 
-                # De-interleave parity
-                parity_start = i * parity_per_codeword
-                interleaved_parity = parity[parity_start:parity_start + parity_per_codeword]
+                # De-interleave parity (same interleaving as encoder)
+                interleaved_parity = bytearray(
+                    parity[j] for j in range(i, len(parity), num_codewords)
+                )
 
                 # Decode codeword
                 codeword = interleaved_data + bytearray(interleaved_parity)
@@ -212,6 +213,13 @@ class SimpleFEC:
             fec_ratio: Target parity overhead (0.0 to 0.5)
         """
         self.fec_ratio = fec_ratio
+
+        # If fec_ratio is 0 or very small, disable FEC entirely
+        if fec_ratio <= 0.001:
+            self.nsym = 0
+            self.encoder = None
+            self.decoder = None
+            return
 
         # Calculate nsym based on ratio
         # For RS(255, k), nsym = 255 - k

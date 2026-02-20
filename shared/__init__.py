@@ -31,6 +31,42 @@ from .crypto import (
     compute_file_hash, compute_data_hash, check_crypto_available
 )
 
+from .enhanced_encoding import (
+    EnhancedEncodingProfile,
+    ENHANCED_LUMA_LEVELS, ENHANCED_LUMA_THRESHOLDS,
+    ColorState, ENHANCED_COLOR_RGB, ENHANCED_COLOR_YCBCR,
+    CalibrationData,
+    luma_to_bits_enhanced, bits_to_luma_enhanced,
+    get_color_rgb, detect_color_state,
+    ENHANCED_PROFILE_CONSERVATIVE, ENHANCED_PROFILE_STANDARD,
+    CALIBRATION_MAGIC, is_calibration_frame_marker,
+    SYNC_MAGIC, is_sync_frame_marker,
+)
+
+from .enhanced_encoder import (
+    EnhancedFrameEncoder,
+    pack_data_for_enhanced_frame, unpack_data_from_enhanced_frame,
+)
+
+from .enhanced_decoder import (
+    EnhancedFrameDecoder, EnhancedDecodeResult,
+    EnhancedStreamDecoder,
+)
+
+from .cuda_decoder import (
+    CUDAFrameDecoder, CUDAVideoProcessor,
+    check_cuda_available, get_cuda_info,
+)
+
+from .binary_frame import (
+    BinaryFrameHeader, BinaryDecodeStats,
+    BINARY_MAGIC, BINARY_HEADER_SIZE, BINARY_CRC_SIZE, BINARY_FRAME_BYTES,
+    BINARY_FLAG_FIRST, BINARY_FLAG_LAST, BINARY_FLAG_ENCRYPTED, BINARY_FLAG_METADATA,
+    calculate_binary_payload_capacity,
+    bytes_to_binary_frame, binary_frame_to_bytes,
+    encode_binary_frame, decode_binary_frame,
+)
+
 __all__ = [
     # Constants
     'FRAME_WIDTH', 'FRAME_HEIGHT', 'DEFAULT_FPS',
@@ -51,4 +87,29 @@ __all__ = [
     # Crypto
     'Encryptor', 'Decryptor', 'derive_key',
     'compute_file_hash', 'compute_data_hash', 'check_crypto_available',
+    # Enhanced Encoding
+    'EnhancedEncodingProfile',
+    'ENHANCED_LUMA_LEVELS', 'ENHANCED_LUMA_THRESHOLDS',
+    'ColorState', 'ENHANCED_COLOR_RGB', 'ENHANCED_COLOR_YCBCR',
+    'CalibrationData',
+    'luma_to_bits_enhanced', 'bits_to_luma_enhanced',
+    'get_color_rgb', 'detect_color_state',
+    'ENHANCED_PROFILE_CONSERVATIVE', 'ENHANCED_PROFILE_STANDARD',
+    'CALIBRATION_MAGIC', 'is_calibration_frame_marker',
+    'SYNC_MAGIC', 'is_sync_frame_marker',
+    # Enhanced Encoder/Decoder
+    'EnhancedFrameEncoder',
+    'pack_data_for_enhanced_frame', 'unpack_data_from_enhanced_frame',
+    'EnhancedFrameDecoder', 'EnhancedDecodeResult',
+    'EnhancedStreamDecoder',
+    # CUDA Decoder
+    'CUDAFrameDecoder', 'CUDAVideoProcessor',
+    'check_cuda_available', 'get_cuda_info',
+    # Binary Frame Protocol
+    'BinaryFrameHeader', 'BinaryDecodeStats',
+    'BINARY_MAGIC', 'BINARY_HEADER_SIZE', 'BINARY_CRC_SIZE', 'BINARY_FRAME_BYTES',
+    'BINARY_FLAG_FIRST', 'BINARY_FLAG_LAST', 'BINARY_FLAG_ENCRYPTED', 'BINARY_FLAG_METADATA',
+    'calculate_binary_payload_capacity',
+    'bytes_to_binary_frame', 'binary_frame_to_bytes',
+    'encode_binary_frame', 'decode_binary_frame',
 ]
