@@ -264,6 +264,9 @@ class BinaryReceiver:
         last_block_time = None
         start_time = None
 
+        diag_count = 0
+        diag_interval = 120  # print diagnostics every N frames
+
         try:
             while self._running:
                 gray = capture.get_frame(timeout=0.5)
@@ -282,6 +285,23 @@ class BinaryReceiver:
 
                 # Decode
                 header, payload, stats = decode_binary_frame(gray, self.fec)
+
+                # Periodic diagnostics when no valid frames detected yet
+                diag_count += 1
+                if self.session_id is None and diag_count % diag_interval == 0:
+                    mn, mx = int(gray.min()), int(gray.max())
+                    mean = float(gray.mean())
+                    # Check how binary the image is (pixels near 0 or 255)
+                    near_black = int(np.sum(gray < 64))
+                    near_white = int(np.sum(gray > 192))
+                    total_px = gray.size
+                    binary_pct = (near_black + near_white) / total_px * 100
+                    # Check first 32 bytes after thresholding
+                    raw_bytes = binary_frame_to_bytes(gray)
+                    magic_hex = raw_bytes[:4].hex()
+                    print(f"  [diag] frame#{diag_count}: min={mn} max={mx} mean={mean:.0f} "
+                          f"binary={binary_pct:.0f}% magic=0x{magic_hex} "
+                          f"decoded={self.frames_decoded} failed={self.frames_failed}")
 
                 if header is None or not stats.valid_header:
                     self.frames_failed += 1
